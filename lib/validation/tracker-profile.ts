@@ -16,6 +16,28 @@ export const discoveryBackendBySource = {
 } as const;
 export const discoverySourcesSchema = z.array(z.enum(discoverySourceIds)).min(1, "Select at least one discovery source.").max(discoverySourceIds.length).transform((items) => [...new Set(items)]);
 
+const manualList = z.array(z.string().trim().min(2).max(240)).max(30).transform((items) => [...new Set(items)]);
+const manualWebsiteList = z.array(z.string().trim().url().max(500).refine((value) => {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return url.protocol === "https:" && !url.username && !url.password && !["localhost", "127.0.0.1", "::1"].includes(host) && !host.endsWith(".local") && !host.endsWith(".internal");
+  } catch { return false; }
+}, "Use public HTTPS website or feed URLs.")).max(20).transform((items) => [...new Set(items)]);
+
+export const manualTrackerSchema = z.object({
+  keyword: z.string().trim().min(2).max(180),
+  keywords: z.array(z.string().trim().min(2).max(240)).min(1).max(30).transform((items) => [...new Set(items)]),
+  intentKeywords: manualList,
+  negativeKeywords: manualList,
+  communities: z.array(z.string().trim().regex(/^(?:r\/)?[A-Za-z0-9_]{2,21}$/, "Use subreddit names such as r/SaaS.")).max(20).transform((items) => [...new Set(items)]),
+  sources: z.array(z.enum(["reddit", "serper", "firecrawl", "rss", "hackernews"])).min(1, "Select at least one discovery provider.").max(5).transform((items) => [...new Set(items)]),
+  websites: manualWebsiteList,
+  queries: manualList,
+  alertThreshold: z.coerce.number().int().min(0).max(100),
+});
+export type ManualTrackerInput = z.infer<typeof manualTrackerSchema>;
+
 const suggestionList = z.array(z.string().trim().min(2).max(240)).max(30).transform((items) => [...new Set(items.map((item) => item.trim()).filter(Boolean))]);
 const productKeywordList = z.array(z.string().trim().min(2).max(240)).min(1).max(20).transform((items) => [...new Set(items.map((item) => item.trim()).filter(Boolean))]);
 const publicWebsiteList = z.array(z.string().trim().url().max(500).refine((value) => {

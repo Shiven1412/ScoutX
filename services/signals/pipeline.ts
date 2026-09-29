@@ -7,6 +7,20 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export type ScheduledJob = keyof typeof signalProviders | "reprocess" | "analytics";
 
+export async function markTrackerRunFailed(organizationId: string, trackerId: string, runId: string) {
+  const admin = createAdminClient();
+  const now = new Date().toISOString();
+  const { data: failed, error } = await admin.from("tracker_runs").update({
+    status: "failed", progress: 100, last_error: "Collection stopped unexpectedly. Check provider configuration and retry.", completed_at: now,
+  }).eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organizationId).in("status", ["queued", "running"]).select("id").maybeSingle();
+  if (error) {
+    console.error("Unexpected tracker run failure could not be persisted", { trackerId, runId, code: error.code });
+    return;
+  }
+  if (!failed) return;
+  await writeTrackerEvent(organizationId, trackerId, runId, "run_failed", "Collection stopped unexpectedly", { reason: "The run stopped before its providers completed. Check server logs and retry." });
+}
+
 export async function runScheduledJob(job: ScheduledJob) {
   const admin = createAdminClient();
   const { data: run, error: startError } = await admin.from("cron_job_runs").insert({ job_name: job, status: "running" }).select("id").single();
@@ -66,6 +80,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
 
   let completedProviders = 0;
   let insertedTotal = 0;
+  let collectedTotal = 0;
   let failedProviders = 0;
   let recoveredFailures = 0;
   let attemptedProviders = 0;
@@ -83,11 +98,14 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
       await admin.from("provider_status").upsert({ organization_id: organizationId, provider: providerName, connected: true, sync_status: "syncing", updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
       await writeTrackerEvent(organizationId, trackerId, runId, "provider_connected", `${providerNameLabel(providerName)} connected`, { provider: providerName, status: "connected" });
       const collected = await provider.collectSignals(enriched);
+      collectedTotal += collected.length;
       const inserted = await scoreDeduplicateAndIngest(enriched, providerName, collected, runId);
       insertedTotal += inserted;
       completedProviders += 1;
       await admin.from("provider_status").upsert({ organization_id: organizationId, provider: providerName, connected: true, sync_status: "healthy", last_sync_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
       await writeTrackerEvent(organizationId, trackerId, runId, "provider_completed", `${providerNameLabel(providerName)} scan complete`, { provider: providerName, collected: collected.length, inserted, duration_ms: Date.now() - providerStartedAt });
+      console.log("Tracker provider collection completed", { trackerId, organizationId, runId, provider: providerName, recordsCollected: collected.length, signalsInserted: inserted });
+      if (collected.length === 0) console.log("Tracker is not tracking anything", { trackerId, organizationId, runId, provider: providerName, reason: "The provider returned no records." });
     } catch (error) {
       failedProviders += 1;
       const detail = error instanceof Error ? error.message : "Unknown provider failure";
@@ -99,11 +117,14 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
         await writeTrackerEvent(organizationId, trackerId, runId, "provider_started", "Trying Apify Reddit fallback", { provider: "apify", status: "connecting" });
         try {
           const fallbackSignals = await signalProviders.apify.collectSignals(enriched);
+          collectedTotal += fallbackSignals.length;
           const inserted = await scoreDeduplicateAndIngest(enriched, "apify", fallbackSignals, runId);
           insertedTotal += inserted;
           recoveredFailures += 1;
           await admin.from("provider_status").upsert({ organization_id: organizationId, provider: "apify", connected: true, sync_status: "healthy", last_sync_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
           await writeTrackerEvent(organizationId, trackerId, runId, "provider_completed", "Apify Reddit fallback complete", { provider: "apify", collected: fallbackSignals.length, inserted });
+          console.log("Tracker provider collection completed", { trackerId, organizationId, runId, provider: "apify", recordsCollected: fallbackSignals.length, signalsInserted: inserted });
+          if (fallbackSignals.length === 0) console.log("Tracker is not tracking anything", { trackerId, organizationId, runId, provider: "apify", reason: "The fallback provider returned no records." });
         } catch (fallbackError) {
           console.error("Apify Reddit fallback failed", fallbackError instanceof Error ? fallbackError.message : "Unknown error");
           await admin.from("provider_status").upsert({ organization_id: organizationId, provider: "apify", connected: true, sync_status: "error", updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
@@ -115,11 +136,14 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
         await writeTrackerEvent(organizationId, trackerId, runId, "provider_started", "Trying public search fallback for crawl sources", { provider: "serper", status: "connecting" });
         try {
           const fallbackSignals = await signalProviders.serper.collectSignals({ ...enriched, sources: [] });
+          collectedTotal += fallbackSignals.length;
           const inserted = await scoreDeduplicateAndIngest(enriched, "serper", fallbackSignals, runId);
           insertedTotal += inserted;
           recoveredFailures += 1;
           await admin.from("provider_status").upsert({ organization_id: organizationId, provider: "serper", connected: true, sync_status: "healthy", last_sync_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
           await writeTrackerEvent(organizationId, trackerId, runId, "provider_completed", "Public search fallback complete", { provider: "serper", collected: fallbackSignals.length, inserted });
+          console.log("Tracker provider collection completed", { trackerId, organizationId, runId, provider: "serper", recordsCollected: fallbackSignals.length, signalsInserted: inserted });
+          if (fallbackSignals.length === 0) console.log("Tracker is not tracking anything", { trackerId, organizationId, runId, provider: "serper", reason: "The fallback provider returned no records." });
         } catch (fallbackError) {
           console.error("Public search fallback failed", fallbackError instanceof Error ? fallbackError.message : "Unknown error");
           await writeTrackerEvent(organizationId, trackerId, runId, "provider_failed", "Public search fallback failed", { provider: "serper", reason: "Check Serper credentials, quota, and provider availability." });
@@ -133,6 +157,9 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
   const status = !selected.length || (completedProviders === 0 && recoveredFailures === 0) ? "failed" : failedProviders > recoveredFailures ? "partial" : "completed";
   await finishTrackerRun(organizationId, trackerId, runId, status, insertedTotal, status === "failed" ? "No selected discovery provider completed successfully." : null);
   await writeTrackerEvent(organizationId, trackerId, runId, "run_completed", status === "completed" ? "Initial discovery complete" : status === "partial" ? "Discovery complete with source warnings" : "Discovery could not start", { status, signalsFound: insertedTotal, providersCompleted: completedProviders, providersFailed: failedProviders });
+  console.log("Tracker collection run finished", { trackerId, organizationId, runId, status, providersAttempted: attemptedProviders, recordsCollected: collectedTotal, signalsInserted: insertedTotal });
+  if (collectedTotal === 0) console.log("Tracker is not tracking anything", { trackerId, organizationId, runId, reason: selected.length ? "No selected provider returned records." : "No discovery provider is configured." });
+  else if (insertedTotal === 0) console.log("Tracker collection found no new signals", { trackerId, organizationId, runId, recordsCollected: collectedTotal, reason: "Records may have been filtered or already deduplicated." });
   return { status, signalsFound: insertedTotal };
 }
 

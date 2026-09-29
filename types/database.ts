@@ -53,6 +53,9 @@ export interface Database {
       create_workspace: { Args: { target_name: string; target_industry: string | null; target_slug: string; target_keywords: string[] }; Returns: string };
       create_ai_tracker: { Args: { target_org: string; target_profile: Json }; Returns: string };
       create_ai_tracker_with_run: { Args: { target_org: string; target_profile: Json; target_sources: string[] }; Returns: { tracker_id: string; run_id: string }[] };
+      create_manual_tracker_with_run: { Args: { target_org: string; target_keyword: string; target_keywords: string[]; target_intent_keywords: string[]; target_negative_keywords: string[]; target_communities: string[]; target_sources: string[]; target_websites: string[]; target_queries: string[]; target_alert_threshold: number }; Returns: { tracker_id: string; run_id: string }[] };
+      update_manual_tracker: { Args: { target_org: string; target_tracker: string; target_keyword: string; target_keywords: string[]; target_intent_keywords: string[]; target_negative_keywords: string[]; target_communities: string[]; target_sources: string[]; target_websites: string[]; target_queries: string[]; target_alert_threshold: number }; Returns: boolean };
+      create_tracker_run: { Args: { target_org: string; target_tracker: string }; Returns: string };
       consume_ai_rate_limit: { Args: { target_org: string; max_requests?: number }; Returns: boolean };
       aggregate_daily_analytics: { Args: { target_day: string }; Returns: number };
       is_org_member: { Args: { target_org: string }; Returns: boolean };

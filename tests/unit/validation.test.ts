@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emailSchema, signInSchema, signUpSchema } from "@/lib/validation/auth";
 import { leadSchema, outreachSchema, trackerSchema } from "@/lib/validation/records";
-import { businessProfileSchema, discoveryBackendBySource, discoverySourcesSchema } from "@/lib/validation/tracker-profile";
+import { businessProfileSchema, discoveryBackendBySource, discoverySourcesSchema, manualTrackerSchema } from "@/lib/validation/tracker-profile";
 import { parseStructuredJson } from "@/services/ai";
 import { explainProviderFailure } from "@/services/system-diagnostics";
 import { readJsonResponse } from "@/lib/http";
@@ -78,5 +78,23 @@ import { readJsonResponse } from "@/lib/http";
     expect(discoveryBackendBySource.hackernews).toBe("hackernews");
     expect(discoveryBackendBySource.rss).toBe("rss");
     expect(discoveryBackendBySource.github).toBe("serper");
+  });
+
+  it("validates manually configured trackers and requires a real provider", () => {
+    const manual = {
+      keyword: "support software",
+      keywords: ["support software", "customer service platform"],
+      intentKeywords: ["looking for a support tool"],
+      negativeKeywords: ["hiring"],
+      communities: ["r/SaaS"],
+      sources: ["reddit", "serper"],
+      websites: ["https://example.com/feed.xml"],
+      queries: ["best customer support tool"],
+      alertThreshold: 75,
+    };
+    expect(manualTrackerSchema.safeParse(manual).success).toBe(true);
+    expect(manualTrackerSchema.safeParse({ ...manual, sources: [] }).success).toBe(false);
+    expect(manualTrackerSchema.safeParse({ ...manual, communities: ["not a subreddit"] }).success).toBe(false);
+    expect(manualTrackerSchema.safeParse({ ...manual, websites: ["http://localhost/private"] }).success).toBe(false);
   });
 });
