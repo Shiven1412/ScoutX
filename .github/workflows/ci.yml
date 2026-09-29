@@ -82,9 +82,6 @@ jobs:
             })
             .catch((error) => { console.error(error.message); process.exitCode = 1; });
           NODE
-      - name: Build and deploy to Vercel
+      - name: Deploy to Vercel
         if: ${{ env.VERCEL_TOKEN != '' && env.VERCEL_ORG_ID != '' && env.VERCEL_PROJECT_ID != '' }}
-        run: |
-          npx vercel pull --yes --environment=production --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
-          npx vercel build --prod --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
-          npx vercel deploy --prebuilt --prod --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
+        run: npx vercel deploy --yes --prod --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
