@@ -3,6 +3,7 @@ import "server-only";
 import { cookies } from "next/headers";
 import { equalOAuthState } from "@/lib/security";
 import { requireOrganization } from "@/lib/organization";
+import { readJsonResponse } from "@/lib/http";
 import { getPublicEnv, getServerEnv } from "@/lib/env";
 import { encryptSecret } from "@/lib/secret-box";
 import { deliverWebhookEvent } from "@/services/webhooks";
@@ -54,7 +55,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
     if (provider === "slack") {
       const body = new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri });
       const response = await fetch("https://slack.com/api/oauth.v2.access", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body, cache: "no-store", signal: AbortSignal.timeout(10_000) });
-      const result: unknown = await response.json();
+      const result: unknown = await readJsonResponse(response, "Slack");
       if (!response.ok || !isRecord(result) || result.ok !== true || typeof result.access_token !== "string") throw new Error("Slack authorization could not be exchanged.");
       credentials = { access_token: result.access_token, refresh_token: typeof result.refresh_token === "string" ? result.refresh_token : null, expires_in: typeof result.expires_in === "number" ? result.expires_in : null };
       const team = isRecord(result.team) ? result.team : {};
@@ -62,7 +63,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pro
     } else {
       const body = new URLSearchParams({ grant_type: "authorization_code", client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, code });
       const response = await fetch("https://api.hubapi.com/oauth/v1/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body, cache: "no-store", signal: AbortSignal.timeout(10_000) });
-      const result: unknown = await response.json();
+      const result: unknown = await readJsonResponse(response, "HubSpot");
       if (!response.ok || !isRecord(result) || typeof result.access_token !== "string" || typeof result.refresh_token !== "string") throw new Error("HubSpot authorization could not be exchanged.");
       credentials = { access_token: result.access_token, refresh_token: result.refresh_token, expires_at: typeof result.expires_in === "number" ? Date.now() + result.expires_in * 1000 : undefined };
       displayConfig = { portal_id: result.hub_id, scopes: result.scopes, credentials_encrypted: encryptSecret(JSON.stringify(credentials)) };

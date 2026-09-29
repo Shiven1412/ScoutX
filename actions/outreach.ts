@@ -39,7 +39,10 @@ export async function generateDraftFromSignal(data: FormData) {
   try {
     draft = await generateOutreachDraft({ organizationId: organization.id, prospectName: signal.prospect_name, company: signal.company, source: signal.platform, context: signal.post_snippet, channel: channel as "email" | "linkedin" });
   } catch (error) {
-    return { error: error instanceof Error ? error.message : "Draft generation failed." };
+    const message = error instanceof Error ? error.message : "Unknown AI provider error";
+    console.error("Outreach AI generation failed", message);
+    if (message.includes("AI credit limit") || message.includes("rate limit") || message.includes("active subscription")) return { error: message };
+    return { error: "Unable to generate the draft. The configured AI provider is unavailable or returned an invalid response. Please try again." };
   }
   const { data: lead } = await supabase.from("leads").select("id").eq("intent_signal_id", signal.id).eq("organization_id", organization.id).is("deleted_at", null).limit(1).maybeSingle();
   const { data: saved, error: saveError } = await supabase.from("outreach_messages").insert({

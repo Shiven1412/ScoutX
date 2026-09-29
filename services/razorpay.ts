@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getPublicEnv, getServerEnv } from "@/lib/env";
+import { readJsonResponse } from "@/lib/http";
 import { requireOrganization } from "@/lib/organization";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -84,5 +85,7 @@ export async function razorpayRequest<T>(path: string, init: RequestInit = {}): 
     console.error("Razorpay API request failed", { status: response.status, path });
     throw new Error("Razorpay could not complete the billing request.");
   }
-  return await response.json() as T;
+  const result: unknown = await readJsonResponse(response, "Razorpay");
+  if (typeof result !== "object" || result === null || Array.isArray(result)) throw new Error("Razorpay returned an invalid billing response.");
+  return result as T;
 }

@@ -14,12 +14,14 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@hookform/resolvers": "^3.1.1",
     "@radix-ui/react-slot": "^1.2.3",
+    "@sentry/nextjs": "^9.0.0",
     "@supabase/ssr": "^0.7.0",
     "@supabase/supabase-js": "^2.52.1",
-    "@sentry/nextjs": "^9.0.0",
     "@tanstack/react-table": "^8.15.1",
+    "apify-client": "^2.25.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.0.0",
@@ -32,15 +34,16 @@
     "react-dom": "^19.0.0",
     "react-hook-form": "^7.15.0",
     "recharts": "^2.15.0",
-    "resend": "^4.0.0",
+    "resend": "^4.8.0",
     "stripe": "^17.0.0",
     "tailwind-merge": "^3.3.1",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@tailwindcss/postcss": "^4.0.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.0.1",
-    "@playwright/test": "^1.55.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -51,7 +54,6 @@
     "jsdom": "^25.0.1",
     "oxfmt": "^0.2.0",
     "tailwindcss": "^4.0.0",
-    "@tailwindcss/postcss": "^4.0.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.8"
   }

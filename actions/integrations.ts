@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireOrganization } from "@/lib/organization";
+import { readJsonResponse } from "@/lib/http";
 import { decryptSecret } from "@/lib/secret-box";
 import { encryptSecret } from "@/lib/secret-box";
 import { deliverWebhookEvent } from "@/services/webhooks";
@@ -62,8 +63,10 @@ export async function syncHubSpotLeads() {
     if (!env.HUBSPOT_CLIENT_ID || !env.HUBSPOT_CLIENT_SECRET) return { error: "HubSpot OAuth credentials are not configured." };
     const body = new URLSearchParams({ grant_type: "refresh_token", client_id: env.HUBSPOT_CLIENT_ID, client_secret: env.HUBSPOT_CLIENT_SECRET, refresh_token: credentials.refresh_token });
     const response = await fetch("https://api.hubapi.com/oauth/v1/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body, cache: "no-store", signal: AbortSignal.timeout(10_000) });
-    const result: unknown = await response.json();
-    if (!response.ok || !isObject(result) || typeof result.access_token !== "string" || typeof result.refresh_token !== "string" || typeof result.expires_in !== "number") return { error: "HubSpot credentials expired and refresh failed. Reconnect the integration." };
+    let result: unknown;
+    try { result = await readJsonResponse(response, "HubSpot"); }
+    catch { return { error: "HubSpot credentials expired and refresh failed. Reconnect the integration." }; }
+    if (!isObject(result) || typeof result.access_token !== "string" || typeof result.refresh_token !== "string" || typeof result.expires_in !== "number") return { error: "HubSpot credentials expired and refresh failed. Reconnect the integration." };
     credentials = { access_token: result.access_token, refresh_token: result.refresh_token, expires_at: Date.now() + result.expires_in * 1000 };
     const { error: tokenSaveError } = await supabase.from("integrations").update({ configuration: JSON.parse(JSON.stringify({ ...config, credentials_encrypted: encryptSecret(JSON.stringify(credentials)) })) as Json }).eq("id", integration.id);
     if (tokenSaveError) return { error: "HubSpot token refreshed but could not be saved securely." };
@@ -78,8 +81,8 @@ export async function syncHubSpotLeads() {
       const properties = { email: lead.email, firstname: lead.name.split(" ")[0] ?? lead.name, lastname: lead.name.split(" ").slice(1).join(" "), company: lead.company, jobtitle: lead.title ?? "" };
       if (!hubspotId) {
         const search = await fetch("https://api.hubapi.com/crm/v3/objects/contacts/search", { method: "POST", headers: { authorization: `Bearer ${credentials.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ filterGroups: [{ filters: [{ propertyName: "email", operator: "EQ", value: lead.email }] }], properties: ["email"], limit: 1 }), cache: "no-store", signal: AbortSignal.timeout(10_000) });
-        const searchResult: unknown = await search.json();
-        if (search.ok && isObject(searchResult) && Array.isArray(searchResult.results)) {
+        const searchResult: unknown = await readJsonResponse(search, "HubSpot").catch(() => null);
+        if (isObject(searchResult) && Array.isArray(searchResult.results)) {
           const match = searchResult.results[0];
           if (isObject(match) && typeof match.id === "string") hubspotId = match.id;
         }
@@ -89,8 +92,8 @@ export async function syncHubSpotLeads() {
         if (!response.ok) throw new Error("HubSpot contact update failed.");
       } else {
         const response = await fetch("https://api.hubapi.com/crm/v3/objects/contacts", { method: "POST", headers: { authorization: `Bearer ${credentials.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ properties }), cache: "no-store", signal: AbortSignal.timeout(10_000) });
-        const result: unknown = await response.json();
-        if (!response.ok || typeof result !== "object" || result === null || !("id" in result) || typeof result.id !== "string") throw new Error("HubSpot contact creation failed.");
+        const result: unknown = await readJsonResponse(response, "HubSpot");
+        if (typeof result !== "object" || result === null || !("id" in result) || typeof result.id !== "string") throw new Error("HubSpot contact creation failed.");
         hubspotId = result.id;
         const { error: saveError } = await supabase.from("leads").update({ hubspot_contact_id: hubspotId }).eq("id", lead.id).eq("organization_id", organization.id);
         if (saveError) throw new Error("HubSpot contact created but local mapping could not be stored.");

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ArrowLeft, ArrowRight, Search } from "lucide-react";
+import { IntentRealtimeRefresh } from "@/components/analytics/intent-realtime-refresh";
 import { requireOrganization } from "@/lib/organization";
 import type { Database } from "@/types/database";
 
@@ -32,12 +33,12 @@ export default async function IntentsPage({ searchParams }: { searchParams: Prom
   if (error) throw new Error("Intent signals could not be loaded.");
   const rows = data ?? [];
   const pageCount = Math.max(1, Math.ceil((count ?? 0) / pageSize));
-  const platforms = ["reddit", "hackernews", "rss", "slack", "webhook"];
+  const platforms = ["reddit", "x", "linkedin", "hackernews", "indiehackers", "producthunt", "quora", "techforums", "github", "rss", "serper", "firecrawl", "apify", "slack", "webhook"];
   return <div className="space-y-6">
-    <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm text-violet-300">Intent intelligence</p><h1 className="mt-2 text-3xl font-semibold">Signals</h1><p className="mt-2 text-sm text-slate-400">Search and prioritize persisted signals from connected sources.</p></div><p className="text-sm text-slate-500">{count ?? 0} matching records</p></div>
+    <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm text-violet-300">Intent intelligence</p><h1 className="mt-2 text-3xl font-semibold">Signals</h1><p className="mt-2 text-sm text-slate-400">Search and prioritize persisted signals from connected sources.</p></div><div className="flex items-center gap-3"><IntentRealtimeRefresh organizationId={organization.id} /><p className="text-sm text-slate-500">{count ?? 0} matching records</p></div></div>
     <form className="grid gap-3 rounded-xl border border-white/10 bg-slate-900/50 p-4 sm:grid-cols-2 xl:grid-cols-5">
       <label className="relative sm:col-span-2 xl:col-span-2"><span className="sr-only">Search signal, prospect, or company</span><Search className="absolute left-3 top-3 size-4 text-slate-500" /><input name="q" defaultValue={q} placeholder="Search signals, prospects, companies" className="h-10 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-9 pr-3 text-sm outline-none focus:border-violet-400" /></label>
-      <select name="platform" defaultValue={platform} className="h-10 rounded-lg border border-white/10 bg-slate-950 px-3 text-sm"><option value="">All sources</option>{platforms.map((value) => <option value={value} key={value}>{value}</option>)}</select>
+      <select name="platform" defaultValue={platform} className="h-10 rounded-lg border border-white/10 bg-slate-950 px-3 text-sm"><option value="">All sources</option>{platforms.map((value) => <option value={value} key={value}>{value.replaceAll("_", " ")}</option>)}</select>
       <select name="category" defaultValue={category} className="h-10 rounded-lg border border-white/10 bg-slate-950 px-3 text-sm"><option value="">All categories</option>{categories.map((value) => <option value={value} key={value}>{value.replaceAll("_", " ")}</option>)}</select>
       <input name="keyword" defaultValue={keyword} placeholder="Keyword" className="h-10 rounded-lg border border-white/10 bg-slate-950 px-3 text-sm" />
       <div className="flex gap-2"><input type="number" name="confidence" min={0} max={100} defaultValue={minConfidence || ""} placeholder="Min confidence" className="h-10 min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950 px-3 text-sm" /><button className="rounded-lg bg-violet-600 px-4 text-sm font-semibold hover:bg-violet-500">Filter</button></div>

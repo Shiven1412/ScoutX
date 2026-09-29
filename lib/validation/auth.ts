@@ -17,6 +17,7 @@ export const organizationSchema = z.object({
   name: z.string().trim().min(2).max(120),
   industry: z.string().trim().max(100).optional().or(z.literal("")),
   keywords: z.string().max(1000).optional(),
+  businessDescription: z.string().trim().max(3000).optional(),
 });
 
 export const emailSchema = z.object({ email: z.string().trim().email().max(254) });

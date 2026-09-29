@@ -1,10 +1,92 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
+import { after } from "next/server";
 import { requireOrganization } from "@/lib/organization";
 import { trackerSchema } from "@/lib/validation/records";
+import { businessProfileSchema, discoveryBackendBySource, discoverySourcesSchema, generatedBusinessProfileSchema } from "@/lib/validation/tracker-profile";
+import { generateBusinessProfile as generateBusinessProfileWithGemini } from "@/services/ai";
+import type { Json } from "@/types/database";
+import { runTrackerDiscovery } from "@/services/signals/pipeline";
 
 function text(data: FormData, key: string) { return String(data.get(key) ?? ""); }
+
+export async function generateTrackerProfile(data: FormData) {
+  const description = text(data, "businessDescription").trim();
+  if (description.length < 20 || description.length > 3000) return { error: "Describe your product, customers, and value in 20–3,000 characters." };
+  try {
+    const cookieStore = await cookies();
+    cookieStore.delete("scoutx_tracker_brief");
+    const { organization } = await requireOrganization();
+    const profile = await generateBusinessProfileWithGemini({ organizationId: organization.id, businessDescription: description });
+    return { profile };
+  } catch (error) {
+    console.error("Tracker profile generation failed", error instanceof Error ? error.message : "Unknown error");
+    return { error: "Unable to generate discovery plan. Check the provider configuration and try again." };
+  }
+}
+
+export async function createAiTracker(data: FormData) {
+  const description = text(data, "businessDescription").trim();
+  let profileValue: unknown;
+  try { profileValue = JSON.parse(text(data, "profile")); }
+  catch { return { error: "The tracker preview is invalid. Generate the suggestions again." }; }
+  const profile = generatedBusinessProfileSchema.safeParse({ ...profileValue as object, businessDescription: description });
+  if (!profile.success) return { error: profile.error.issues[0]?.message ?? "Review the tracker suggestions and try again." };
+  if (!businessProfileSchema.safeParse(profile.data).success) return { error: "The generated tracker data is invalid." };
+  let sourceValue: unknown;
+  try { sourceValue = JSON.parse(text(data, "sources")); }
+  catch { return { error: "Select at least one discovery source and try again." }; }
+  const sources = discoverySourcesSchema.safeParse(sourceValue);
+  if (!sources.success) return { error: sources.error.issues[0]?.message ?? "Select at least one discovery source." };
+  try {
+    const { supabase, organization } = await requireOrganization();
+    const { data: created, error } = await supabase.rpc("create_ai_tracker_with_run", { target_org: organization.id, target_profile: profile.data as unknown as Json, target_sources: sources.data });
+    const result = Array.isArray(created) ? created[0] : null;
+    if (error || !result?.tracker_id || !result.run_id) {
+      console.error("AI tracker creation failed", { code: error?.code, message: error?.message });
+      return { error: "Tracker creation failed. Check your workspace configuration and retry." };
+    }
+    after(async () => {
+      try {
+        await runTrackerDiscovery(organization.id, result.tracker_id, result.run_id);
+      } catch (error) {
+        console.error("Tracker discovery background run failed", error instanceof Error ? error.message : "Unknown error");
+      }
+    });
+    revalidatePath("/campaigns");
+    revalidatePath("/dashboard");
+    return {
+      success: true,
+      trackerId: result.tracker_id,
+      runId: result.run_id,
+      counts: {
+        keywords: profile.data.keywords.length + profile.data.intentKeywords.length,
+        communities: profile.data.communities.length,
+        subreddits: profile.data.subreddits.length,
+        searchQueries: profile.data.searchQueries.length + profile.data.intentKeywords.length,
+        signalSources: new Set(sources.data.map((source) => discoveryBackendBySource[source])).size,
+      },
+    };
+  } catch (error) {
+    console.error("AI tracker save failed", error instanceof Error ? error.message : "Unknown error");
+    return { error: "Tracker creation failed. Please check your configuration and retry." };
+  }
+}
+
+export async function getTrackerRunSnapshot(trackerId: string, runId: string) {
+  if (!/^[0-9a-f-]{36}$/i.test(trackerId) || !/^[0-9a-f-]{36}$/i.test(runId)) return { error: "Invalid tracker run." };
+  const { supabase, organization } = await requireOrganization();
+  const [runResult, eventsResult, signalsResult, trackerResult] = await Promise.all([
+    supabase.from("tracker_runs").select("id, tracker_id, status, progress, signals_found, providers_total, providers_completed, last_error, started_at, completed_at, created_at").eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organization.id).maybeSingle(),
+    supabase.from("tracker_events").select("id, run_id, event_type, title, details, created_at").eq("run_id", runId).eq("tracker_id", trackerId).eq("organization_id", organization.id).order("created_at", { ascending: false }).limit(40),
+    supabase.from("intent_signals").select("id, platform, provider, community, post_snippet, confidence, intent_score, category, keyword, created_at").eq("tracker_id", trackerId).eq("organization_id", organization.id).order("created_at", { ascending: false }).limit(20),
+    supabase.from("keyword_trackers").select("id, keyword, platforms, communities").eq("id", trackerId).eq("organization_id", organization.id).maybeSingle(),
+  ]);
+  if (runResult.error || eventsResult.error || signalsResult.error || trackerResult.error || !runResult.data || !trackerResult.data) return { error: "Tracker monitoring details could not be loaded." };
+  return { run: runResult.data, events: eventsResult.data ?? [], signals: signalsResult.data ?? [], tracker: trackerResult.data };
+}
 
 export async function createTracker(data: FormData) {
   const parsed = trackerSchema.safeParse({ keyword: text(data, "keyword"), negativeKeywords: text(data, "negativeKeywords"), communities: text(data, "communities"), platforms: text(data, "platforms"), alertThreshold: text(data, "alertThreshold") || "75" });

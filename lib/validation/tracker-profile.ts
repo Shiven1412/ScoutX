@@ -1,0 +1,54 @@
+import { z } from "zod";
+
+export const discoverySourceIds = ["reddit", "x", "linkedin", "hackernews", "indiehackers", "producthunt", "quora", "techforums", "github", "websites", "rss"] as const;
+export const discoveryBackendBySource = {
+  reddit: "reddit",
+  x: "serper",
+  linkedin: "serper",
+  hackernews: "hackernews",
+  indiehackers: "serper",
+  producthunt: "serper",
+  quora: "serper",
+  techforums: "serper",
+  github: "serper",
+  websites: "firecrawl",
+  rss: "rss",
+} as const;
+export const discoverySourcesSchema = z.array(z.enum(discoverySourceIds)).min(1, "Select at least one discovery source.").max(discoverySourceIds.length).transform((items) => [...new Set(items)]);
+
+const suggestionList = z.array(z.string().trim().min(2).max(240)).max(30).transform((items) => [...new Set(items.map((item) => item.trim()).filter(Boolean))]);
+const productKeywordList = z.array(z.string().trim().min(2).max(240)).min(1).max(20).transform((items) => [...new Set(items.map((item) => item.trim()).filter(Boolean))]);
+const publicWebsiteList = z.array(z.string().trim().url().max(500).refine((value) => {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return url.protocol === "https:" && !url.username && !url.password && !["localhost", "127.0.0.1", "::1"].includes(host) && !host.endsWith(".local") && !host.endsWith(".internal");
+  } catch { return false; }
+}, "Use public HTTPS websites or feed URLs.")).max(20).transform((items) => [...new Set(items)]);
+
+export const businessProfileSchema = z.object({
+  businessSummary: z.string().trim().min(20).max(1200),
+  industry: z.string().trim().min(2).max(120),
+  targetAudience: suggestionList,
+  painPoints: suggestionList,
+  competitors: suggestionList,
+  keywords: productKeywordList,
+  intentKeywords: suggestionList,
+  negativeKeywords: suggestionList,
+  subreddits: z.array(z.string().trim().regex(/^r\/[A-Za-z0-9_]{2,21}$/)).max(20).transform((items) => [...new Set(items)]),
+  communities: suggestionList,
+  websites: publicWebsiteList,
+  searchQueries: suggestionList,
+  buyingSignals: suggestionList,
+  outreachAngles: suggestionList,
+});
+
+export const generatedBusinessProfileSchema = businessProfileSchema.extend({
+  businessDescription: z.string().trim().min(20).max(3000),
+  generatedAt: z.string().datetime(),
+  model: z.string().min(1).max(80),
+  promptVersion: z.string().min(1).max(40),
+});
+
+export type BusinessProfile = z.infer<typeof businessProfileSchema>;
+export type GeneratedBusinessProfile = z.infer<typeof generatedBusinessProfileSchema>;

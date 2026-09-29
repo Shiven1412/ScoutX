@@ -6,7 +6,7 @@ import { runScheduledJob, type ScheduledJob } from "@/services/signals/pipeline"
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const jobs = new Set<ScheduledJob>(["reddit", "serper", "firecrawl", "apify", "reprocess", "analytics"]);
+const jobs = new Set<ScheduledJob>(["reddit", "serper", "firecrawl", "apify", "rss", "reprocess", "analytics"]);
 
 export async function GET(request: NextRequest, context: { params: Promise<{ job: string }> }) {
   const secret = getServerEnv().CRON_SECRET;

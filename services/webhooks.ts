@@ -4,6 +4,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { readJsonResponse } from "@/lib/http";
 import { decryptSecret } from "@/lib/secret-box";
 
 export async function deliverWebhookEvent(organizationId: string, eventName: string, data: Record<string, unknown>) {
@@ -53,7 +54,7 @@ async function deliverSlackEvent(admin: ReturnType<typeof createAdminClient>, or
       cache: "no-store",
       signal: AbortSignal.timeout(8_000),
     });
-    const result: unknown = await response.json();
+      const result: unknown = await readJsonResponse(response, "Slack");
     if (!response.ok || typeof result !== "object" || result === null || !("ok" in result) || result.ok !== true) throw new Error("Slack API did not accept the notification.");
     await admin.from("integrations").update({ last_sync_at: new Date().toISOString(), sync_status: "healthy" }).eq("id", integration.id);
   } catch (error) {
