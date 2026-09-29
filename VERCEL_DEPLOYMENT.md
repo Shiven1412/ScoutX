@@ -12,4 +12,6 @@
 9. Enable Vercel Preview Deployments. Preview Supabase and Stripe projects should be isolated from production customer data and live payment methods.
 10. Configure the GitHub Actions Vercel deploy job using repository secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`. The job deploys only pushes to `main` and is skipped when those secrets are absent.
 
+The checked-in `vercel.json` uses once-daily schedules so production deploys are compatible with Vercel Hobby. Hobby cron timing may vary by up to 59 minutes. More frequent monitoring requires Vercel Pro or a separately managed scheduler; update the cron expressions only after confirming the target account plan supports their frequency.
+
 Sentry and PostHog may remain unset; the application disables those providers when their DSNs/keys are absent. Vercel schedules the authenticated collection and analytics jobs defined in `vercel.json`. New API keys use the `scoutx_` prefix; existing `scoutify_` keys remain accepted.
