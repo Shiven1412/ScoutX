@@ -1,8 +1,8 @@
-import type { NextRequest } from "next/server";
+import { NextRequest, type NextRequest as NextRequestType } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 import { getPublicEnv } from "@/lib/env";
 
-export async function middleware(request: NextRequest) {
+export async function middleware(request: NextRequestType) {
   const bytes = crypto.getRandomValues(new Uint8Array(18));
   const nonce = btoa(String.fromCharCode(...bytes));
   const env = getPublicEnv();
@@ -30,9 +30,11 @@ export async function middleware(request: NextRequest) {
     "frame-ancestors 'none'",
     "upgrade-insecure-requests",
   ].join("; ");
-  request.headers.set("x-nonce", nonce);
-  request.headers.set("Content-Security-Policy", csp);
-  const response = await updateSession(request);
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("Content-Security-Policy", csp);
+  const requestWithNonce = new NextRequest(request, { headers: requestHeaders });
+  const response = await updateSession(requestWithNonce);
   response.headers.set("Content-Security-Policy", csp);
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("X-Frame-Options", "DENY");

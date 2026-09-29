@@ -8,7 +8,8 @@ const userOnlyPrefixes = ["/settings/team/invitations"];
 const authPrefixes = ["/login", "/register", "/forgot-password"];
 
 export async function updateSession(request: NextRequest) {
-  let response = NextResponse.next({ request });
+  const nextResponse = () => NextResponse.next({ request: { headers: new Headers(request.headers) } });
+  let response = nextResponse();
   const hasSupabaseConfig = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!hasSupabaseConfig) {
     if (protectedPrefixes.some((prefix) => request.nextUrl.pathname.startsWith(prefix))) {
@@ -25,7 +26,7 @@ export async function updateSession(request: NextRequest) {
       getAll: () => request.cookies.getAll(),
       setAll(cookiesToSet) {
         cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
-        response = NextResponse.next({ request });
+          response = nextResponse();
         cookiesToSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
       },
     },

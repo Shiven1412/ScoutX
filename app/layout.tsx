@@ -4,6 +4,8 @@ import { Suspense } from "react";
 import { AnalyticsProvider } from "@/components/providers/analytics-provider";
 import { getPublicEnv } from "@/lib/env";
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: { default: "ScoutX — Intent intelligence for revenue teams", template: "%s · ScoutX" },
   description: "ScoutX — Find buyers before your competitors do.",
