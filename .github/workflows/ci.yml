@@ -43,6 +43,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: validate
     runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -53,12 +57,13 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Link Vercel project
+        if: ${{ env.VERCEL_TOKEN != '' && env.VERCEL_ORG_ID != '' && env.VERCEL_PROJECT_ID != '' }}
+        run: |
+          mkdir -p .vercel
+          printf '{"orgId":"%s","projectId":"%s"}\n' "$VERCEL_ORG_ID" "$VERCEL_PROJECT_ID" > .vercel/project.json
       - name: Build and deploy to Vercel
         if: ${{ env.VERCEL_TOKEN != '' && env.VERCEL_ORG_ID != '' && env.VERCEL_PROJECT_ID != '' }}
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
           npx vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
           npx vercel build --prod --token="$VERCEL_TOKEN"
