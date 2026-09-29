@@ -62,9 +62,29 @@ jobs:
         run: |
           mkdir -p .vercel
           printf '{"orgId":"%s","projectId":"%s"}\n' "$VERCEL_ORG_ID" "$VERCEL_PROJECT_ID" > .vercel/project.json
+      - name: Verify Vercel project access
+        if: ${{ env.VERCEL_TOKEN != '' && env.VERCEL_ORG_ID != '' && env.VERCEL_PROJECT_ID != '' }}
+        run: |
+          node <<'NODE'
+          const url = new URL(`https://api.vercel.com/v9/projects/${encodeURIComponent(process.env.VERCEL_PROJECT_ID)}`);
+          url.searchParams.set("teamId", process.env.VERCEL_ORG_ID);
+          fetch(url, { headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` } })
+            .then(async (response) => {
+              if (response.ok) {
+                console.log("Vercel project access verified.");
+                return;
+              }
+              const status = response.status;
+              if (status === 401) throw new Error("Vercel rejected VERCEL_TOKEN. Create a valid token and update the GitHub secret.");
+              if (status === 403) throw new Error("The token is valid but lacks access to this Vercel team/project. Check token team access and VERCEL_ORG_ID.");
+              if (status === 404) throw new Error("Vercel could not find this project in the selected team. Verify VERCEL_PROJECT_ID and VERCEL_ORG_ID from this project's .vercel/project.json.");
+              throw new Error(`Vercel project access check failed (HTTP ${status}). Check token scope and project/team IDs.`);
+            })
+            .catch((error) => { console.error(error.message); process.exitCode = 1; });
+          NODE
       - name: Build and deploy to Vercel
         if: ${{ env.VERCEL_TOKEN != '' && env.VERCEL_ORG_ID != '' && env.VERCEL_PROJECT_ID != '' }}
         run: |
-          npx vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
-          npx vercel build --prod --token="$VERCEL_TOKEN"
-          npx vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+          npx vercel pull --yes --environment=production --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
+          npx vercel build --prod --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
+          npx vercel deploy --prebuilt --prod --scope="$VERCEL_ORG_ID" --token="$VERCEL_TOKEN"
