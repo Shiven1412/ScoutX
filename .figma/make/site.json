@@ -1,0 +1,10 @@
+{
+  "description": "AI-driven platform that uncovers real-time buyer intent across social channels to empower B2B sales teams with personalized outreach and lead insights.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

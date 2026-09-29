@@ -1,0 +1,3 @@
+export default function WorkspaceLoading() {
+  return <div role="status" aria-label="Loading workspace" className="space-y-7 animate-pulse"><div><div className="h-3 w-32 rounded bg-white/10" /><div className="mt-3 h-8 w-64 rounded bg-white/10" /><div className="mt-3 h-4 w-80 max-w-full rounded bg-white/[.06]" /></div><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <div key={index} className="h-28 rounded-xl border border-white/10 bg-slate-900/50" />)}</div><div className="grid gap-4 lg:grid-cols-2"><div className="h-80 rounded-xl border border-white/10 bg-slate-900/50" /><div className="h-80 rounded-xl border border-white/10 bg-slate-900/50" /></div></div>;
+}

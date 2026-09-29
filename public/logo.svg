@@ -1,0 +1,21 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="scoutGradient" x1="0" y1="0" x2="160" y2="160">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <circle cx="80" cy="80" r="72" stroke="url(#scoutGradient)" stroke-width="4" opacity="0.3"/>
+  <circle cx="80" cy="80" r="50" stroke="url(#scoutGradient)" stroke-width="3" opacity="0.6"/>
+  <path d="M80 80 L132 48" stroke="url(#scoutGradient)" stroke-width="4" stroke-linecap="round"/>
+  <path d="M68 68 L92 92" stroke="white" stroke-width="5" stroke-linecap="round"/>
+  <path d="M92 68 L68 92" stroke="white" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="80" cy="80" r="18" fill="url(#scoutGradient)" filter="url(#glow)"/>
+</svg>
