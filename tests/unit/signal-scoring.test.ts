@@ -15,7 +15,7 @@ describe("keyword signal scoring fallback", () => {
     expect(result.buying_probability).toBeGreaterThan(15);
     expect(result.urgency).toBeGreaterThan(10);
     expect(Object.keys(result)).toEqual([
-      "category", "confidence", "intent_score", "pain_intensity", "buying_probability", "urgency", "decision_maker_likelihood", "budget_intent", "title_relevance", "snippet_relevance", "source_weight",
+      "category", "confidence", "intent_score", "pain_intensity", "buying_probability", "urgency", "decision_maker_likelihood", "budget_intent", "is_qualified", "rejection_reason", "sales_opportunity_summary", "detected_pain_point", "title_relevance", "snippet_relevance", "source_weight",
     ]);
   });
 
@@ -32,9 +32,9 @@ describe("keyword signal scoring fallback", () => {
     const titleMatch = scoreIntentWithKeywords({ keyword: "analytics platform", title: "Analytics platform recommendations", context: "Somebody asked for recommendations.", source: "hackernews" });
     const snippetMatch = scoreIntentWithKeywords({ keyword: "analytics platform", title: "Product discussion", context: "We need an analytics platform and recommendations.", source: "serper" });
     expect(titleMatch.title_relevance).toBe(2);
-    expect(titleMatch.intent_score).toBeGreaterThan(snippetMatch.intent_score);
-    expect(titleMatch.source_weight).toBe(1);
-    expect(snippetMatch.source_weight).toBe(0.9);
+    expect(snippetMatch.intent_score).toBeGreaterThan(titleMatch.intent_score);
+    expect(titleMatch.source_weight).toBe(0.95);
+    expect(snippetMatch.source_weight).toBe(0.85);
   });
 
   it("classifies Gemini failure types without exposing the API key", () => {
@@ -45,15 +45,15 @@ describe("keyword signal scoring fallback", () => {
     expect(quota.code).toBe("quota_exceeded");
     expect(quota.status).toBe(429);
     expect(malformed.code).toBe("response_parse_failed");
-    expect(() => parseStructuredJson("<html>proxy block</html>", "Gemini")).toThrow(/HTML instead of JSON/);
-    expect(() => parseStructuredJson("{invalid json", "Gemini")).toThrow(/malformed JSON/);
+    expect(() => parseStructuredJson("<html>proxy block</html>", "Gemini")).toThrow(/HTML or XML instead of JSON/);
+    expect(() => parseStructuredJson("{invalid json", "Gemini")).toThrow(/malformed structured data/);
   });
 
   it("uses keyword fallback for missing Gemini and malformed responses", () => {
     const input = { keyword: "support chatbot", context: "We need a support chatbot recommendation for our team." };
     const unavailable = scoreIntentWithFallback(input, new GeminiScoringError("missing_api_key", "Gemini API key missing."));
     const malformed = scoreIntentWithFallback(input, new GeminiScoringError("response_parse_failed", "Gemini returned HTML instead of JSON."));
-    expect(unavailable.model).toBe("keyword-fallback");
+    expect(unavailable.model).toBe("deterministic-fallback");
     expect(unavailable.fallbackCode).toBe("missing_api_key");
     expect(unavailable.intent_score).toBeGreaterThan(0);
     expect(malformed.fallbackCode).toBe("response_parse_failed");

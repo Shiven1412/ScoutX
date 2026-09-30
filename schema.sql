@@ -91,7 +91,7 @@ create table if not exists public.intent_signals (
   post_snippet text not null,
   intent_score integer not null check (intent_score between 0 and 100),
   confidence integer not null check (confidence between 0 and 100),
-  category text not null check (category in ('pain_point', 'seeking_alternative', 'feature_request', 'buying_intent', 'recommendation_request')),
+  category text not null check (category in ('pain_point', 'seeking_alternative', 'feature_request', 'buying_intent', 'recommendation_request', 'self_promotion', 'product_launch', 'thought_leadership', 'career_discussion', 'general_discussion', 'ignore')),
   pain_intensity integer not null check (pain_intensity between 0 and 100),
   buying_probability integer not null check (buying_probability between 0 and 100),
   urgency integer not null check (urgency between 0 and 100),

@@ -33,11 +33,37 @@ export async function generateDraftFromSignal(data: FormData) {
   const channel = value(data, "channel");
   if (!/^[0-9a-f-]{36}$/i.test(id) || !["email", "linkedin"].includes(channel)) return { error: "Invalid signal or channel." };
   const { supabase, user, organization } = await requireOrganization();
-  const { data: signal, error } = await supabase.from("intent_signals").select("id, prospect_name, company, platform, keyword, source_url, post_snippet").eq("id", id).eq("organization_id", organization.id).maybeSingle();
+  const { data: signal, error } = await supabase.from("intent_signals").select("id, prospect_name, company, platform, keyword, source_url, post_snippet, category, intent_score, buying_probability, tracker_id").eq("id", id).eq("organization_id", organization.id).maybeSingle();
   if (error || !signal) return { error: "Signal is unavailable." };
+  if (!signal.tracker_id) return { error: "This signal has no linked seller profile for outreach." };
+  const { data: sellerProfile, error: profileError } = await supabase.from("tracker_profiles").select("business_description, business_summary, target_audience, pain_points").eq("tracker_id", signal.tracker_id).eq("organization_id", organization.id).maybeSingle();
+  if (profileError || !sellerProfile) return { error: "A saved seller profile is required before outreach can be generated." };
   let draft: Awaited<ReturnType<typeof generateOutreachDraft>>;
   try {
-    draft = await generateOutreachDraft({ organizationId: organization.id, prospectName: signal.prospect_name, company: signal.company, source: signal.platform, context: signal.post_snippet, channel: channel as "email" | "linkedin" });
+    const qualifiedCategory = ["buying_intent", "seeking_alternative", "recommendation_request", "pain_point"].includes(signal.category);
+    draft = await generateOutreachDraft({
+      organizationId: organization.id,
+      prospectName: signal.prospect_name,
+      company: signal.company,
+      source: signal.platform,
+      context: signal.post_snippet,
+      channel: channel as "email" | "linkedin",
+      qualification: {
+        category: signal.category,
+        intent_score: signal.intent_score,
+        buying_probability: signal.buying_probability,
+        is_qualified: qualifiedCategory && signal.intent_score >= 70 && signal.buying_probability >= 50,
+        detected_pain_point: signal.post_snippet.slice(0, 500),
+        sales_opportunity_summary: signal.post_snippet.slice(0, 1000),
+      },
+      seller: {
+        productName: signal.keyword,
+        description: sellerProfile.business_description,
+        valueProposition: sellerProfile.business_summary,
+        targetAudience: sellerProfile.target_audience,
+        painPointsSolved: sellerProfile.pain_points,
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown AI provider error";
     console.error("Outreach AI generation failed", message);
