@@ -3,7 +3,6 @@ import "server-only";
 import OpenAI from "openai";
 import { z } from "zod";
 import { getServerEnv } from "@/lib/env";
-import { readJsonResponse } from "@/lib/http";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { businessProfileSchema } from "@/lib/validation/tracker-profile";
 
@@ -25,17 +24,90 @@ export const BUSINESS_PROFILE_PROMPT_VERSION = "business-profile-v1";
 
 const MAX_REQUESTS_PER_MINUTE = 30;
 let openAiClient: OpenAI | undefined;
+let geminiScoringUnavailableUntil = 0;
+let geminiScoringUnavailableReason: string | undefined;
+let geminiModelValidated = false;
+
+export type GeminiFailureCode = "missing_api_key" | "rate_limited" | "quota_exceeded" | "model_unavailable" | "response_parse_failed" | "invalid_api_key" | "ai_credit_exhausted" | "subscription_required" | "provider_unavailable";
+
+export class GeminiScoringError extends Error {
+  constructor(readonly code: GeminiFailureCode, message: string, readonly status?: number) {
+    super(message);
+    this.name = "GeminiScoringError";
+  }
+}
+
+let geminiStartupLogged = false;
+
+export function logGeminiStartupConfiguration() {
+  if (geminiStartupLogged) return;
+  geminiStartupLogged = true;
+  try {
+    const env = getServerEnv();
+    console.info("Gemini startup validation", { apiKeyDetected: Boolean(env.GEMINI_API_KEY), selectedModel: env.GEMINI_MODEL, mode: env.GEMINI_API_KEY ? "ready for runtime validation" : "keyword fallback enabled" });
+    if (!env.GEMINI_API_KEY) console.warn("Gemini API key missing; signal scoring will use deterministic keyword fallback.");
+  } catch (error) {
+    console.error("Gemini startup validation failed", { message: error instanceof Error ? error.message : "Invalid server environment" });
+  }
+}
+
+async function validateGeminiModel(model: string, apiKey: string) {
+  if (geminiModelValidated) return;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`;
+  console.info("Gemini model availability check", { model, url });
+  let response: Response;
+  try {
+    response = await fetch(url, { headers: { "x-goog-api-key": apiKey, accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
+  } catch (error) {
+    throw new GeminiScoringError("provider_unavailable", `Gemini model check could not reach Google: ${error instanceof Error ? error.message : "network error"}`);
+  }
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const body = await response.text().catch(() => "");
+  console.info("Gemini model availability response", { model, status: response.status, contentType });
+  if (response.status === 404) throw new GeminiScoringError("model_unavailable", `Gemini model '${model}' is unavailable (HTTP 404).`, 404);
+  if (response.status === 401 || response.status === 403) throw new GeminiScoringError("invalid_api_key", `Gemini rejected the configured API key (HTTP ${response.status}).`, response.status);
+  if (response.status === 429) throw geminiHttpError(response.status, body);
+  if (!response.ok) throw new GeminiScoringError("provider_unavailable", `Gemini model check failed with HTTP ${response.status}.`, response.status);
+  if (!contentType.includes("json")) throw new GeminiScoringError("response_parse_failed", `Gemini model check returned ${contentType.includes("html") || /<html/i.test(body) ? "HTML" : "a non-JSON response"} instead of JSON (HTTP ${response.status}); a network proxy or gateway may be intercepting the request.`, response.status);
+  try {
+    const modelInfo = JSON.parse(body) as { name?: unknown };
+    if (typeof modelInfo.name !== "string" || !modelInfo.name.endsWith(model)) throw new GeminiScoringError("model_unavailable", `Gemini model check returned an unexpected model for '${model}'.`, response.status);
+  } catch (error) {
+    if (error instanceof GeminiScoringError) throw error;
+    throw new GeminiScoringError("response_parse_failed", "Gemini model check returned malformed JSON.", response.status);
+  }
+  geminiModelValidated = true;
+}
 
 async function generateGeminiJson<T>(organizationId: string, prompt: string, schema: z.ZodType<T>, maxOutputTokens = 1200): Promise<{ value: T; model: string }> {
-  const apiKey = getServerEnv().GEMINI_API_KEY;
-  if (!apiKey) throw new Error("Gemini is not configured. Add GEMINI_API_KEY to the server environment.");
-  await consumeAiRateLimit(organizationId);
-  await consumeAiCredit(organizationId);
+  const env = getServerEnv();
+  const apiKey = env.GEMINI_API_KEY;
+  const model = env.GEMINI_MODEL;
+  console.info("Gemini initialization", { apiKeyDetected: Boolean(apiKey), model, operation: "generate-json" });
+  if (!apiKey) {
+    console.error("Gemini API key detection failed", { apiKeyDetected: false, model });
+    throw new GeminiScoringError("missing_api_key", "Gemini API key missing: set GEMINI_API_KEY in the server runtime environment.");
+  }
+  try {
+    await validateGeminiModel(model, apiKey);
+    await consumeAiRateLimit(organizationId);
+    await consumeAiCredit(organizationId);
+  } catch (error) {
+    if (error instanceof GeminiScoringError) throw error;
+    const message = error instanceof Error ? error.message : "Gemini setup validation failed.";
+    if (/rate limit/i.test(message)) throw new GeminiScoringError("rate_limited", message, 429);
+    if (/AI credit limit|quota/i.test(message)) throw new GeminiScoringError("ai_credit_exhausted", message);
+    if (/active subscription/i.test(message)) throw new GeminiScoringError("subscription_required", message);
+    throw new GeminiScoringError("provider_unavailable", message);
+  }
 
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
+      const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+      console.info("Gemini model creation", { model, requestUrl, attempt: attempt + 1 });
+      console.info("Gemini generateContent call", { model, attempt: attempt + 1, promptCharacters: prompt.length });
+      const response = await fetch(requestUrl, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
         body: JSON.stringify({
@@ -44,23 +116,41 @@ async function generateGeminiJson<T>(organizationId: string, prompt: string, sch
         }),
         signal: AbortSignal.timeout(20_000),
       });
+      console.info("Gemini generateContent response", { model, status: response.status, contentType: response.headers.get("content-type"), ok: response.ok, attempt: attempt + 1 });
+      const body = await response.text();
       if (!response.ok) {
-        const retryable = response.status === 429 || response.status >= 500;
-        if (retryable && attempt < 2) {
-          await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+        const error = geminiHttpError(response.status, body);
+        if ((error.code === "rate_limited" || (response.status >= 500 && response.status < 600)) && attempt < 2) {
+          const retryAfter = Number(response.headers.get("retry-after"));
+          await new Promise((resolve) => setTimeout(resolve, Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 5000) : 250 * 2 ** attempt));
           continue;
         }
-        throw new Error(`Gemini request failed with status ${response.status}.`);
+        throw error;
       }
-      const result: unknown = await readJsonResponse(response, "Gemini");
-      const text = getCandidateText(result);
-      const parsed = parseStructuredJson(text, "Gemini");
-      const value = schema.parse(parsed);
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (!contentType.includes("json")) throw new GeminiScoringError("response_parse_failed", `Gemini returned ${contentType.includes("html") || /<html/i.test(body) ? "HTML" : "a non-JSON response"} instead of JSON (HTTP ${response.status}); a network proxy or gateway may be intercepting the request.`, response.status);
+      let result: unknown;
+      try { result = JSON.parse(body) as unknown; }
+      catch { throw new GeminiScoringError("response_parse_failed", `Gemini returned malformed response JSON (HTTP ${response.status}).`, response.status); }
+      console.info("Gemini response parsing", { model, stage: "json-envelope", success: true });
+      let validation: ReturnType<typeof schema.safeParse>;
+      try {
+        const text = getCandidateText(result);
+        const parsed = parseStructuredJson(text, "Gemini");
+        validation = schema.safeParse(parsed);
+      } catch (error) {
+        if (error instanceof GeminiScoringError) throw error;
+        throw new GeminiScoringError("response_parse_failed", `Gemini response parsing failed: ${error instanceof Error ? error.message : "invalid response"}`);
+      }
+      if (!validation.success) throw new GeminiScoringError("response_parse_failed", `Gemini response failed score schema validation: ${validation.error.issues[0]?.message ?? "invalid response shape"}`);
+      const value = validation.data;
+      console.info("Gemini response parsing", { model, stage: "schema-validation", success: true });
       await recordGeminiStatus(organizationId, "healthy", true);
-      return { value, model: "gemini-2.5-flash" };
+      return { value, model };
     } catch (error) {
       lastError = error;
-      if (attempt < 2 && !(error instanceof Error && /status 4\d\d/.test(error.message) && !/status 429/.test(error.message))) {
+      console.error("Gemini generation or parsing failed", { model, attempt: attempt + 1, code: error instanceof GeminiScoringError ? error.code : "unknown", message: error instanceof Error ? error.message : "Unknown Gemini error" });
+      if (attempt < 2 && (error instanceof GeminiScoringError ? error.code === "rate_limited" || (error.status !== undefined && error.status >= 500) : true)) {
         await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
         continue;
       }
@@ -68,7 +158,22 @@ async function generateGeminiJson<T>(organizationId: string, prompt: string, sch
     }
   }
   await recordGeminiStatus(organizationId, "error", true);
-  throw lastError instanceof Error ? lastError : new Error("Gemini generation failed.");
+  throw lastError instanceof Error ? lastError : new GeminiScoringError("provider_unavailable", "Gemini generation failed.");
+}
+
+export function geminiHttpError(status: number, body: string): GeminiScoringError {
+  let providerCode = "";
+  let providerMessage = "";
+  try {
+    const payload = JSON.parse(body) as { error?: { status?: unknown; message?: unknown; code?: unknown } };
+    providerCode = String(payload.error?.status ?? payload.error?.code ?? "");
+    providerMessage = typeof payload.error?.message === "string" ? payload.error.message.slice(0, 300) : "";
+  } catch { /* response body is deliberately not logged verbatim */ }
+  if (/RESOURCE_EXHAUSTED|quota/i.test(`${providerCode} ${providerMessage}`)) return new GeminiScoringError("quota_exceeded", `Gemini quota exceeded (HTTP ${status}). ${providerMessage}`.trim(), status);
+  if (status === 429) return new GeminiScoringError("rate_limited", `Gemini rate limited the request (HTTP ${status}). ${providerMessage}`.trim(), status);
+  if (status === 404) return new GeminiScoringError("model_unavailable", `Gemini model is unavailable (HTTP 404). ${providerMessage}`.trim(), status);
+  if (status === 401 || status === 403) return new GeminiScoringError("invalid_api_key", `Gemini rejected the API key (HTTP ${status}). ${providerMessage}`.trim(), status);
+  return new GeminiScoringError("provider_unavailable", `Gemini request failed (HTTP ${status}). ${providerMessage}`.trim(), status);
 }
 
 async function recordGeminiStatus(organizationId: string, syncStatus: "healthy" | "error", connected: boolean) {
@@ -120,10 +225,69 @@ function getCandidateText(result: unknown): string {
   return text;
 }
 
-export async function scoreIntent(input: { organizationId: string; keyword: string; source: string; context: string }) {
-  const { value, model } = await generateGeminiJson(input.organizationId, `Analyze only this public discussion. Do not infer facts that are not stated. Return JSON matching the requested score fields. Keyword: ${input.keyword}\nSource: ${input.source}\nDiscussion: ${input.context}`, scoreSchema);
-  return { ...value, model };
+export async function scoreIntent(input: { organizationId: string; keyword: string; source: string; context: string; title?: string }) {
+  if (geminiScoringUnavailableUntil > Date.now()) {
+    console.warn("Gemini unavailable for intent scoring; using keyword fallback", { source: input.source, keyword: input.keyword, reason: geminiScoringUnavailableReason ?? "Recent Gemini failure" });
+    return scoreIntentWithFallback(input, new GeminiScoringError("provider_unavailable", geminiScoringUnavailableReason ?? "Gemini temporarily unavailable"));
+  }
+  try {
+    console.info("Signal scoring started", { provider: "gemini", source: input.source, keyword: input.keyword, contextCharacters: input.context.length });
+    const { value, model } = await generateGeminiJson(input.organizationId, `Analyze only this public discussion. Do not infer facts that are not stated. Return JSON matching the requested score fields. Keyword: ${input.keyword}\nSource: ${input.source}\nTitle: ${input.title ?? "(not provided)"}\nDiscussion: ${input.context}`, scoreSchema);
+    console.info("Signal scoring completed", { provider: model, source: input.source, keyword: input.keyword });
+    geminiScoringUnavailableUntil = 0;
+    geminiScoringUnavailableReason = undefined;
+    return { ...value, model };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Unknown Gemini scoring error";
+    const code = error instanceof GeminiScoringError ? error.code : "provider_unavailable";
+    geminiScoringUnavailableUntil = Date.now() + 60_000;
+    geminiScoringUnavailableReason = reason;
+    console.error("Gemini signal scoring failed; using deterministic keyword fallback", { source: input.source, keyword: input.keyword, code, reason });
+    await recordGeminiStatus(input.organizationId, "error", Boolean(getServerEnv().GEMINI_API_KEY));
+    return scoreIntentWithFallback(input, new GeminiScoringError(code, reason));
+  }
 }
+
+export function scoreIntentWithKeywords(input: { keyword: string; context: string; title?: string; source?: string }) {
+  const title = (input.title ?? "").toLocaleLowerCase();
+  const text = input.context.toLocaleLowerCase();
+  const terms = (value: string) => value.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2);
+  const productTerms = [...new Set(terms(input.keyword))];
+  const matchesTerm = (term: string, value: string) => new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegex(term)}([^\\p{L}\\p{N}]|$)`, "iu").test(value);
+  const titleMatches = productTerms.filter((term) => matchesTerm(term, title));
+  const snippetMatches = productTerms.filter((term) => matchesTerm(term, text));
+  const cues = {
+    buying_intent: ["looking for", "need", "recommend", "recommendation", "pricing", "purchase", "buy", "trial", "evaluate", "looking to buy", "any suggestions"],
+    seeking_alternative: ["alternative", "switch from", "replace", "replacement", "instead of", "competitor", "better than"],
+    feature_request: ["feature request", "would be nice", "wish it had", "missing feature", "please add", "support for"],
+    pain_point: ["problem", "struggling", "frustrated", "pain point", "doesn't work", "difficult", "issue", "broken", "slow", "expensive"],
+    recommendation_request: ["recommend", "recommendation", "suggestions", "what do you use", "anyone using", "looking for a tool"],
+  } as const;
+  const cueCounts = Object.fromEntries(Object.entries(cues).map(([category, phrases]) => [category, phrases.filter((phrase) => text.includes(phrase)).length])) as Record<keyof typeof cues, number>;
+  const ranked = Object.entries(cueCounts).sort((left, right) => right[1] - left[1]);
+  const category = ranked[0]?.[1] ? ranked[0][0] as keyof typeof cues : "pain_point";
+  const totalCues = Object.values(cueCounts).reduce((sum, count) => sum + count, 0);
+  const sourceWeight = ({ reddit: 1, hackernews: 1, x: 0.95, linkedin: 0.95, serper: 0.9, firecrawl: 0.85, rss: 0.8 } as Record<string, number>)[input.source ?? ""] ?? 0.85;
+  const weightedRelevance = titleMatches.length * 2 + snippetMatches.length;
+  const intent_score = clampScore((25 + weightedRelevance * 7 + totalCues * 9) * sourceWeight);
+  const confidence = clampScore((35 + titleMatches.length * 12 + snippetMatches.length * 6 + totalCues * 8) * sourceWeight);
+  return {
+    category,
+    confidence,
+    intent_score,
+    pain_intensity: clampScore(20 + cueCounts.pain_point * 18),
+    buying_probability: clampScore(15 + cueCounts.buying_intent * 18 + cueCounts.recommendation_request * 10),
+    urgency: clampScore(10 + (/(urgent|asap|immediately|this week|today)/i.test(text) ? 45 : 0) + cueCounts.buying_intent * 8),
+    decision_maker_likelihood: clampScore(25 + (/(i am the|our team|my company|we need|our company)/i.test(text) ? 30 : 0)),
+    budget_intent: clampScore(10 + (/(budget|pricing|cost|price|paid|per month|\/month)/i.test(text) ? 45 : 0)),
+    title_relevance: titleMatches.length,
+    snippet_relevance: snippetMatches.length,
+    source_weight: sourceWeight,
+  };
+}
+
+function clampScore(value: number) { return Math.max(0, Math.min(100, Math.round(value))); }
+function escapeRegex(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 export async function classifyIntent(input: { organizationId: string; keyword: string; source: string; context: string }) {
   const score = await scoreIntent(input);
@@ -235,4 +399,10 @@ Business description: ${JSON.stringify(input.businessDescription)}`;
       throw new Error("Unable to generate discovery plan. The configured AI providers are unavailable or returned an invalid plan.");
     }
   }
+}
+
+export function scoreIntentWithFallback(input: { keyword: string; context: string; title?: string; source?: string }, error: unknown) {
+  const reason = error instanceof Error ? error.message : "Unknown Gemini scoring error";
+  const code = error instanceof GeminiScoringError ? error.code : "provider_unavailable";
+  return { ...scoreIntentWithKeywords(input), model: "keyword-fallback" as const, fallbackReason: reason, fallbackCode: code };
 }

@@ -156,11 +156,15 @@ export async function updateTracker(data: FormData) {
 
 export async function rerunTracker(data: FormData) {
   const id = text(data, "id");
+  const diagnosticMode = text(data, "diagnosticMode") === "true";
   if (!/^[0-9a-f-]{36}$/i.test(id)) return { error: "Invalid tracker." };
   try {
     const { supabase, organization } = await requireOrganization();
-    const { data: runId, error } = await supabase.rpc("create_tracker_run", { target_org: organization.id, target_tracker: id });
-    if (error || !runId) return { error: "A new collection run could not be started. Ensure the tracker is active and try again." };
+    const { data: runId, error } = await supabase.rpc("create_tracker_run", { target_org: organization.id, target_tracker: id, target_diagnostic_mode: diagnosticMode });
+    if (error || !runId) {
+      console.error("Tracker run could not be created", { code: error?.code, message: error?.message, diagnosticMode });
+      return { error: "A new collection run could not be started. Apply the tracker management and provider diagnostics migrations, ensure the tracker is active, then retry." };
+    }
     after(async () => {
       try { await runTrackerDiscovery(organization.id, id, runId); }
       catch (error) {
@@ -180,7 +184,7 @@ export async function getTrackerRunSnapshot(trackerId: string, runId: string) {
   if (!/^[0-9a-f-]{36}$/i.test(trackerId) || !/^[0-9a-f-]{36}$/i.test(runId)) return { error: "Invalid tracker run." };
   const { supabase, organization } = await requireOrganization();
   const [runResult, eventsResult, signalsResult, trackerResult] = await Promise.all([
-    supabase.from("tracker_runs").select("id, tracker_id, status, progress, signals_found, providers_total, providers_completed, last_error, started_at, completed_at, created_at").eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organization.id).maybeSingle(),
+    supabase.from("tracker_runs").select("id, tracker_id, status, progress, signals_found, providers_total, providers_completed, last_error, diagnostic_mode, started_at, completed_at, created_at").eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organization.id).maybeSingle(),
     supabase.from("tracker_events").select("id, run_id, event_type, title, details, created_at").eq("run_id", runId).eq("tracker_id", trackerId).eq("organization_id", organization.id).order("created_at", { ascending: false }).limit(40),
     supabase.from("intent_signals").select("id, platform, provider, community, post_snippet, confidence, intent_score, category, keyword, created_at").eq("tracker_id", trackerId).eq("organization_id", organization.id).order("created_at", { ascending: false }).limit(20),
     supabase.from("keyword_trackers").select("id, keyword, platforms, communities").eq("id", trackerId).eq("organization_id", organization.id).maybeSingle(),

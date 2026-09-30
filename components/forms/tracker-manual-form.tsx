@@ -10,7 +10,7 @@ import { FormField, Input } from "@/components/ui/form-field";
 const providers = [
   { id: "reddit", label: "Reddit API", note: "Public posts in selected subreddits" },
   { id: "serper", label: "Public web search", note: "Search-indexed public conversations" },
-  { id: "hackernews", label: "Hacker News", note: "Stories and comments" },
+  { id: "hackernews", label: "Hacker News", note: "Uses the first HN tag: stories only; comments are excluded" },
   { id: "firecrawl", label: "Website scraping", note: "Public pages you list below" },
   { id: "rss", label: "RSS feeds", note: "Public feed URLs you list below" },
 ] as const;
@@ -80,7 +80,7 @@ export function TrackerManualForm({ initialValues = emptyValues, mode = "create"
     setValues((current) => ({ ...current, sources: current.sources.includes(source) ? current.sources.filter((item) => item !== source) : [...current.sources, source] }));
   }
 
-  return <form onSubmit={submit} className="space-y-6">
+  return <form method="post" onSubmit={submit} className="space-y-6">
     {mode === "create" && <div className="flex items-start gap-3 rounded-xl border border-indigo-300/15 bg-indigo-300/[.04] p-4"><Activity className="mt-0.5 size-4 shrink-0 text-indigo-200" /><p className="text-sm leading-6 text-slate-300">Set your own keywords and sources. Creating this tracker immediately starts a real collection run; the next screen shows provider activity and results live.</p></div>}
     <FormField label="Primary keyword"><Input required minLength={2} maxLength={180} value={values.keyword} onChange={(event) => setValues({ ...values, keyword: event.target.value })} placeholder="e.g. customer support software" /></FormField>
     <ListField label="Product keywords · required" value={values.keywords} onChange={(value) => setList("keywords", value)} placeholder="One keyword or phrase per line" />

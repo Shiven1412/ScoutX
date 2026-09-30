@@ -15,7 +15,7 @@ const sourceOptions: SourceOption[] = [
   { id: "reddit", label: "Reddit", description: "Subreddits, posts, and public discussions", mode: "Direct API", icon: MessageCircle },
   { id: "x", label: "X", description: "Publicly indexed posts and conversations", mode: "Public web search", icon: Globe2 },
   { id: "linkedin", label: "LinkedIn", description: "Publicly indexed professional discussions", mode: "Public web search", icon: Users },
-  { id: "hackernews", label: "Hacker News", description: "Ask HN, Show HN, and startup discussions", mode: "Direct API", icon: Code2 },
+  { id: "hackernews", label: "Hacker News", description: "Uses the first HN tag: stories only; comments are excluded", mode: "Direct API", icon: Code2 },
   { id: "indiehackers", label: "Indie Hackers", description: "Founder stories and product discussions", mode: "Public web search", icon: Compass },
   { id: "producthunt", label: "Product Hunt", description: "Launch pages and indexed product feedback", mode: "Public web search", icon: Sparkles },
   { id: "quora", label: "Quora", description: "Public questions and recommendations", mode: "Public web search", icon: MessageCircle },

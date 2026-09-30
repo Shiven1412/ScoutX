@@ -3,7 +3,7 @@ import "server-only";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { getServerEnv } from "@/lib/env";
-import { fetchJson } from "@/lib/http";
+import { readJsonResponse } from "@/lib/http";
 
 export type SignalTracker = {
   id: string;
@@ -12,6 +12,7 @@ export type SignalTracker = {
   negative_keywords: string[];
   communities: string[];
   platforms: string[];
+  alert_threshold?: number;
   keywords?: string[];
   queries?: string[];
   sources?: Array<{ source_type: string; provider: string; source_value: string }>;
@@ -29,17 +30,47 @@ export type CollectedSignal = {
   tracker_id: string;
 };
 
+export type ProviderRequestDiagnostic = { url: string; status: number | null; recordsFetched: number };
+export type ProviderCollectionResult = {
+  signals: CollectedSignal[];
+  recordsFetched: number;
+  recordsFiltered: number;
+  requests: ProviderRequestDiagnostic[];
+  rawPreview: Array<Record<string, string | number | boolean | null>>;
+  warnings: string[];
+  zeroReason: "missing_source_list" | "api_response_empty" | "parser_failure" | "rate_limited" | "provider_request_failed" | null;
+};
+export type ProviderCollectionOptions = { diagnosticMode?: boolean };
+export const HACKER_NEWS_SEARCH_TAG = "story";
+
 export interface SignalProvider {
   readonly name: "reddit" | "firecrawl" | "serper" | "apify" | "rss" | "hackernews";
-  collectSignals(tracker: SignalTracker): Promise<CollectedSignal[]>;
+  collectSignals(tracker: SignalTracker, options?: ProviderCollectionOptions): Promise<ProviderCollectionResult>;
   normalizeSignals(records: unknown[], tracker: SignalTracker): CollectedSignal[];
   healthCheck(): Promise<boolean>;
 }
 
 abstract class BaseSignalProvider implements SignalProvider {
   abstract readonly name: SignalProvider["name"];
-  abstract collectSignals(tracker: SignalTracker): Promise<CollectedSignal[]>;
+  abstract collectSignals(tracker: SignalTracker, options?: ProviderCollectionOptions): Promise<ProviderCollectionResult>;
   abstract healthCheck(): Promise<boolean>;
+
+  collectionResult(signals: CollectedSignal[], recordsFetched: number, records: unknown[], requests: ProviderRequestDiagnostic[], missingSource = false, warnings: string[] = []): ProviderCollectionResult {
+    const recordsFiltered = Math.max(0, recordsFetched - signals.length);
+    const rateLimited = requests.some((request) => request.status === 429);
+    const requestFailed = requests.some((request) => request.status === null || request.status < 200 || request.status >= 300);
+    const result: ProviderCollectionResult = {
+      signals,
+      recordsFetched,
+      recordsFiltered,
+      requests,
+      rawPreview: records.slice(0, 10).map(safeRawPreview),
+      warnings,
+      zeroReason: signals.length ? null : missingSource ? "missing_source_list" : rateLimited ? "rate_limited" : warnings.length || (recordsFetched > 0 && signals.length === 0) ? "parser_failure" : requestFailed ? "provider_request_failed" : recordsFetched ? "parser_failure" : "api_response_empty",
+    };
+    console.log("Tracker provider collection summary", { provider: this.name, recordsFetched, recordsFiltered, signalsProduced: signals.length, zeroReason: result.zeroReason, requests });
+    return result;
+  }
 
   normalizeSignals(records: unknown[], tracker: SignalTracker): CollectedSignal[] {
     return records.flatMap((record) => {
@@ -81,6 +112,10 @@ export class RedditSignalProvider extends BaseSignalProvider {
     if (!targets.length) targets.push("");
     const keywords = [...new Set([...(tracker.keywords ?? []), tracker.keyword])].slice(0, 3);
     const posts: unknown[] = [];
+    const rawRecords: unknown[] = [];
+    const requests: ProviderRequestDiagnostic[] = [];
+    let recordsFetched = 0;
+    console.log("Tracker provider configuration", { provider: this.name, trackerId: tracker.id, keywords, sources: { subreddits: targets, communities: tracker.communities } });
     for (const community of targets) {
       for (const keyword of keywords) {
         const path = community ? `/r/${encodeURIComponent(community)}/search.json` : "/search.json";
@@ -90,23 +125,29 @@ export class RedditSignalProvider extends BaseSignalProvider {
         url.searchParams.set("t", "week");
         url.searchParams.set("limit", "15");
         if (community) url.searchParams.set("restrict_sr", "on");
-        const result = await providerFetchJson(url, { headers: { authorization: `Bearer ${token}`, "user-agent": getServerEnv().REDDIT_USER_AGENT! } }, "Reddit");
+        const result = await providerFetchJson(url, { headers: { authorization: `Bearer ${token}`, "user-agent": getServerEnv().REDDIT_USER_AGENT! } }, "Reddit", requests);
         const children = isRecord(result) && isRecord(result.data) && Array.isArray(result.data.children) ? result.data.children : [];
+        recordsFetched += children.length;
+        setRequestRecordCount(requests, children.length);
         for (const child of children) {
         if (!isRecord(child) || !isRecord(child.data)) continue;
         const post = child.data;
+        rawRecords.push(post);
         const postId = getString(post, ["id"]);
         const permalink = getString(post, ["permalink"]);
         posts.push({ ...post, id: `reddit:${postId}`, url: permalink ? `https://www.reddit.com${permalink}` : "", matched_keyword: keyword });
         if (postId) {
           const commentsUrl = `https://oauth.reddit.com/comments/${encodeURIComponent(postId)}.json?limit=10&depth=1`;
           try {
-            const comments = await providerFetchJson(new URL(commentsUrl), { headers: { authorization: `Bearer ${token}`, "user-agent": getServerEnv().REDDIT_USER_AGENT! } }, "Reddit comments");
+            const comments = await providerFetchJson(new URL(commentsUrl), { headers: { authorization: `Bearer ${token}`, "user-agent": getServerEnv().REDDIT_USER_AGENT! } }, "Reddit comments", requests);
             const listing = Array.isArray(comments) ? comments[1] : null;
             const commentChildren = isRecord(listing) && isRecord(listing.data) && Array.isArray(listing.data.children) ? listing.data.children : [];
+            recordsFetched += commentChildren.length;
+            setRequestRecordCount(requests, commentChildren.length);
             for (const item of commentChildren.slice(0, 5)) {
               if (!isRecord(item) || !isRecord(item.data)) continue;
               const comment = item.data;
+              rawRecords.push(comment);
               if (getString(comment, ["body"]).trim()) {
                 const commentPermalink = getString(comment, ["permalink"]);
                 posts.push({ ...comment, id: `reddit-comment:${getString(comment, ["id"])}`, url: commentPermalink ? `https://www.reddit.com${commentPermalink}` : "", post_title: getString(post, ["title"]), matched_keyword: keyword });
@@ -119,7 +160,8 @@ export class RedditSignalProvider extends BaseSignalProvider {
       }
       }
     }
-    return posts.flatMap((post) => isRecord(post) ? this.normalizeSignals([post], { ...tracker, keyword: getString(post, ["matched_keyword"]) || tracker.keyword }) : []);
+    const signals = posts.flatMap((post) => isRecord(post) ? this.normalizeSignals([post], { ...tracker, keyword: getString(post, ["matched_keyword"]) || tracker.keyword }) : []);
+    return this.collectionResult(signals, recordsFetched, rawRecords, requests);
   }
 
   private async getAccessToken() {
@@ -155,11 +197,19 @@ export class SerperSignalProvider extends BaseSignalProvider {
       ? siteTargets.flatMap((siteGroup) => baseQueries.slice(0, Math.max(1, Math.floor(8 / siteTargets.length))).map((query) => `${siteGroup.split("|").map((site) => `site:${site}`).join(" OR ")} ${query}`)).slice(0, 8)
       : baseQueries;
     const collected: CollectedSignal[] = [];
+    const requests: ProviderRequestDiagnostic[] = [];
+    const rawRecords: unknown[] = [];
+    let recordsFetched = 0;
+    console.log("Tracker provider configuration", { provider: this.name, trackerId: tracker.id, keywords: baseQueries, sources: siteTargets, requestCount: queries.length });
     for (const query of queries) {
+      console.log("Tracker provider API request", { provider: this.name, url: "https://google.serper.dev/search", method: "POST", query });
       const payload = await providerFetchJson(new URL("https://google.serper.dev/search"), {
         method: "POST", headers: { "content-type": "application/json", "X-API-KEY": apiKey }, body: JSON.stringify({ q: query, num: 10 }),
-      }, "Serper");
+      }, "Serper", requests);
       const organic = isRecord(payload) && Array.isArray(payload.organic) ? payload.organic : [];
+      recordsFetched += organic.length;
+      rawRecords.push(...organic);
+      setRequestRecordCount(requests, organic.length);
       for (const record of organic) {
         if (!isRecord(record)) continue;
         const url = getString(record, ["link", "url"]);
@@ -169,7 +219,7 @@ export class SerperSignalProvider extends BaseSignalProvider {
         collected.push({ platform: sourcePlatformFromQuery(query), external_id: externalId.slice(0, 500), keyword: query, prospect_name: null, company: null, source_url: isPublicHttpUrl(url) ? url : null, post_snippet: snippet.slice(0, 10_000), raw_payload: pickSafePayload(record), tracker_id: tracker.id });
       }
     }
-    return collected;
+    return this.collectionResult(collected, recordsFetched, rawRecords, requests, queries.length === 0);
   }
 }
 
@@ -182,33 +232,46 @@ export class FirecrawlSignalProvider extends BaseSignalProvider {
     const apiKey = getServerEnv().FIRECRAWL_API_KEY;
     if (!apiKey) throw new Error("Firecrawl is not configured.");
     const records: unknown[] = [];
+    const rawRecords: unknown[] = [];
+    const requests: ProviderRequestDiagnostic[] = [];
+    const warnings: string[] = [];
     const savedWebsites = tracker.sources?.filter((source) => source.source_type === "website" && source.provider === "firecrawl" && !isFeedUrl(source.source_value)).map((source) => source.source_value) ?? [];
     const trackedUrls = [...new Set([...savedWebsites, ...tracker.communities.filter((value) => /^https:\/\//i.test(value))].filter(isPublicHttpUrl))].slice(0, 10);
+    const queries = [...new Set([...(tracker.queries ?? []), ...(tracker.keywords ?? []), tracker.keyword])];
+    console.log("Tracker provider configuration", { provider: this.name, trackerId: tracker.id, keywords: queries, sources: trackedUrls });
     if (trackedUrls.length) {
       for (const url of trackedUrls) {
         try {
           const payload = await providerFetchJson(new URL("https://api.firecrawl.dev/v2/scrape"), {
             method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
             body: JSON.stringify({ url, formats: ["markdown", "rawHtml"], onlyMainContent: true }),
-          }, "Firecrawl");
+          }, "Firecrawl", requests);
           if (!isRecord(payload) || !isRecord(payload.data)) continue;
           const data = payload.data;
+          recordsFetchedFromRequest(requests, 1);
+          rawRecords.push({ url, ...data });
           const metadata = isRecord(data.metadata) ? data.metadata : {};
           const isFeed = /\.(rss|xml|atom)(?:$|\?)/i.test(new URL(url).pathname) || /\b(feed|rss|atom)\b/i.test(url);
           if (isFeed) records.push(...parseFeedRecords(url, data.rawHtml ?? data.html ?? data.markdown));
           else records.push({ id: url, url, markdown: data.markdown, title: metadata.title });
         } catch (error) {
-          console.warn("Firecrawl failed for one tracked source URL", error);
+          const warning = error instanceof Error ? error.message : "Unknown provider error";
+          warnings.push(`${redactUrl(url)}: ${warning}`.slice(0, 500));
+          console.warn("Firecrawl failed for one tracked source URL", { trackerId: tracker.id, url: redactUrl(url), message: warning });
         }
       }
     } else {
+      if (!queries.length) return this.collectionResult([], 0, [], requests, true);
       const payload = await providerFetchJson(new URL("https://api.firecrawl.dev/v2/search"), {
-        method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ query: tracker.keyword, limit: 10 }),
-      }, "Firecrawl");
+        method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ query: queries[0], limit: 10 }),
+      }, "Firecrawl", requests);
       const results = isRecord(payload) && Array.isArray(payload.data) ? payload.data : [];
+      recordsFetchedFromRequest(requests, results.length);
+      rawRecords.push(...results);
       records.push(...results);
     }
-    return this.normalizeSignals(records, tracker);
+    const signals = this.normalizeSignals(records, tracker);
+    return this.collectionResult(signals, requests.reduce((sum, request) => sum + request.recordsFetched, 0), rawRecords, requests, trackedUrls.length === 0 && !queries.length, warnings);
   }
 }
 
@@ -222,14 +285,38 @@ export class ApifySignalProvider extends BaseSignalProvider {
     if (!env.APIFY_TOKEN || !env.APIFY_ACTOR_ID) throw new Error("Apify token or actor ID is not configured.");
     const actor = encodeURIComponent(env.APIFY_ACTOR_ID);
     const url = new URL(`https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items`);
-    url.searchParams.set("token", env.APIFY_TOKEN);
     url.searchParams.set("timeout", "60");
     url.searchParams.set("limit", "50");
+    const requests: ProviderRequestDiagnostic[] = [];
+    console.log("Tracker provider configuration", { provider: this.name, trackerId: tracker.id, keywords: [tracker.keyword], sources: { actorId: env.APIFY_ACTOR_ID, maximumResults: 50 } });
+    const isGoogleSearchScraper = /(?:^|\/)google-search-scraper$/i.test(env.APIFY_ACTOR_ID);
+    const actorInput = isGoogleSearchScraper
+      ? { queries: tracker.keyword, maxPagesPerQuery: 1, resultsPerPage: 10 }
+      : { searchStringsArray: [tracker.keyword], maxResults: 50 };
     const payload = await providerFetchJson(url, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ searchStringsArray: [tracker.keyword], maxResults: 50 }),
-    }, "Apify");
-    return this.normalizeSignals(Array.isArray(payload) ? payload : [], tracker);
+      method: "POST", headers: { authorization: `Bearer ${env.APIFY_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify(actorInput),
+    }, "Apify", requests);
+    const datasetItems = Array.isArray(payload) ? payload : [];
+    const searchPages = isGoogleSearchScraper ? datasetItems.filter(isRecord) : [];
+    const googleResults = isGoogleSearchScraper ? normalizeApifyGoogleSearchPages(datasetItems) : [];
+    const rawRecords = isGoogleSearchScraper ? googleResults : datasetItems;
+    const recordsFetched = isGoogleSearchScraper ? googleResults.length : datasetItems.length;
+    recordsFetchedFromRequest(requests, recordsFetched);
+    const signals = this.normalizeSignals(rawRecords, tracker);
+    const warnings = isGoogleSearchScraper
+      ? searchPages.flatMap((page) => page["#error"] !== undefined && page["#error"] !== false && page["#error"] !== "false" ? [`Apify Google Search Scraper reported an error: ${scrubPreviewText(String(page["#error"]))}`] : [])
+      : [];
+    return this.collectionResult(signals, recordsFetched, rawRecords, requests, false, warnings);
   }
+}
+
+export function normalizeApifyGoogleSearchPages(pages: unknown[]) {
+  return pages.filter(isRecord).flatMap((page) => Array.isArray(page.organicResults) ? page.organicResults.filter(isRecord).map((record) => ({
+    ...record,
+    id: getString(record, ["url", "link"]),
+    url: getString(record, ["url", "link"]),
+    description: getString(record, ["description", "snippet"]),
+  })) : []);
 }
 
 export class RssSignalProvider extends BaseSignalProvider {
@@ -241,20 +328,48 @@ export class RssSignalProvider extends BaseSignalProvider {
     const feedUrls = tracker.sources?.filter((source) => source.source_type === "website" && source.provider === "firecrawl" && isFeedUrl(source.source_value)).map((source) => source.source_value) ?? [];
     if (!feedUrls.length) throw new Error("No public RSS feed URLs were added to this tracker. Add a feed URL in the tracker plan or select another source.");
     const records: unknown[] = [];
-    for (const feedUrl of [...new Set(feedUrls)].slice(0, 10)) {
-      if (!await isSafeFeedUrl(feedUrl)) continue;
+    const requests: ProviderRequestDiagnostic[] = [];
+    const rawRecords: unknown[] = [];
+    const warnings: string[] = [];
+    let recordsFetched = 0;
+    const targets = [...new Set(feedUrls)].slice(0, 10);
+    console.log("Tracker provider configuration", { provider: this.name, trackerId: tracker.id, keywords: tracker.queries ?? [tracker.keyword], sources: targets.map(redactUrl) });
+    for (const feedUrl of targets) {
+      if (!await isSafeFeedUrl(feedUrl)) {
+        console.warn("RSS source skipped", { trackerId: tracker.id, reason: "unsafe_or_unresolvable_feed_url", url: redactUrl(feedUrl) });
+        continue;
+      }
       let response: Response;
       try {
         response = await fetch(feedUrl, { headers: { accept: "application/rss+xml, application/atom+xml, application/xml, text/xml" }, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(12_000) });
       } catch {
-        throw new Error("RSS feed could not be reached. Check the public feed URL and retry.");
+        const request: ProviderRequestDiagnostic = { url: redactUrl(feedUrl), status: null, recordsFetched: 0 };
+        requests.push(request);
+        console.error("Tracker provider request failed", { provider: this.name, url: request.url, status: null, reason: "RSS feed could not be reached." });
+        const failure = new Error("RSS feed could not be reached. Check the public feed URL and retry.");
+        Object.assign(failure, { providerRequests: requests });
+        throw failure;
       }
-      if (!response.ok) throw new Error(`RSS feed request failed with status ${response.status}.`);
+      const request: ProviderRequestDiagnostic = { url: redactUrl(feedUrl), status: response.status, recordsFetched: 0 };
+      requests.push(request);
+      console.log("Tracker provider HTTP response", { provider: this.name, url: request.url, status: response.status });
+      if (!response.ok) {
+        const warning = `RSS feed ${redactUrl(feedUrl)} returned HTTP ${response.status}.`;
+        warnings.push(warning);
+        console.warn("RSS source request failed", { trackerId: tracker.id, url: request.url, status: response.status });
+        continue;
+      }
       const body = await response.text();
       if (body.length > 1_000_000) throw new Error("RSS feed response was too large to process.");
-      records.push(...parseFeedRecords(feedUrl, body));
+      const entryCount = body.match(/<(?:item|entry)\b/gi)?.length ?? 0;
+      recordsFetched += entryCount;
+      const parsedRecords = parseFeedRecords(feedUrl, body);
+      request.recordsFetched = entryCount;
+      rawRecords.push(...(body.match(/<(?:item|entry)\b[^>]*>[\s\S]*?<\/(?:item|entry)>/gi) ?? []).slice(0, 10));
+      records.push(...parsedRecords);
     }
-    return records.flatMap((record) => isRecord(record) ? this.normalizeSignals([record], tracker) : []);
+    const signals = records.flatMap((record) => isRecord(record) ? this.normalizeSignals([record], tracker) : []);
+    return this.collectionResult(signals, recordsFetched, rawRecords, requests, targets.length === 0, warnings);
   }
 }
 
@@ -266,13 +381,20 @@ export class HackerNewsSignalProvider extends BaseSignalProvider {
   async collectSignals(tracker: SignalTracker) {
     const queries = [...new Set([...(tracker.queries ?? []), ...(tracker.keywords ?? []), tracker.keyword])].slice(0, 5);
     const signals: CollectedSignal[] = [];
+    const requests: ProviderRequestDiagnostic[] = [];
+    const rawRecords: unknown[] = [];
+    let recordsFetched = 0;
+    console.log("Tracker provider configuration", { provider: this.name, trackerId: tracker.id, keywords: queries, sources: tracker.sources ?? [] });
     for (const query of queries) {
       const url = new URL("https://hn.algolia.com/api/v1/search_by_date");
       url.searchParams.set("query", query);
-      url.searchParams.set("tags", "story,comment");
+      url.searchParams.set("tags", HACKER_NEWS_SEARCH_TAG);
       url.searchParams.set("hitsPerPage", "20");
-      const payload = await providerFetchJson(url, { headers: { accept: "application/json" } }, "Hacker News");
+      const payload = await providerFetchJson(url, { headers: { accept: "application/json" } }, "Hacker News", requests);
       const hits = isRecord(payload) && Array.isArray(payload.hits) ? payload.hits : [];
+      recordsFetched += hits.length;
+      rawRecords.push(...hits);
+      setRequestRecordCount(requests, hits.length);
       for (const hit of hits) {
         if (!isRecord(hit)) continue;
         const id = getString(hit, ["objectID"]);
@@ -283,7 +405,7 @@ export class HackerNewsSignalProvider extends BaseSignalProvider {
         signals.push({ platform: "hackernews", external_id: id, keyword: query, prospect_name: getString(hit, ["author"]) || null, company: null, source_url: isPublicHttpUrl(storyUrl) ? storyUrl : itemUrl, post_snippet: content.replace(/<[^>]*>/g, " ").slice(0, 10_000), raw_payload: pickSafePayload(hit), tracker_id: tracker.id });
       }
     }
-    return signals;
+    return this.collectionResult(signals, recordsFetched, rawRecords, requests, queries.length === 0);
   }
 }
 
@@ -316,21 +438,74 @@ export async function discoverSerperIntent(keyword: string) {
   return isRecord(payload) && Array.isArray(payload.organic) ? payload.organic : [];
 }
 
-async function providerFetchJson(url: URL, init: RequestInit, provider: string) {
+async function providerFetchJson(url: URL, init: RequestInit, provider: string, diagnostics: ProviderRequestDiagnostic[] = []) {
   if (url.protocol !== "https:" || !["oauth.reddit.com", "www.reddit.com", "google.serper.dev", "api.firecrawl.dev", "api.apify.com", "hn.algolia.com"].includes(url.hostname)) throw new Error("Provider URL is not permitted.");
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      return await fetchJson(url, { ...init, signal: AbortSignal.timeout(30_000) }, provider);
+      const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
+      const request: ProviderRequestDiagnostic = { url: redactUrl(url.toString()), status: response.status, recordsFetched: 0 };
+      diagnostics.push(request);
+      console.log("Tracker provider HTTP response", { provider, url: request.url, status: response.status, attempt: attempt + 1 });
+      return await readJsonResponse(response, provider);
     } catch (error) {
       const status = typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : undefined;
+      const requestError = status !== undefined && (status < 200 || status >= 300);
+      console.error(requestError ? "Tracker provider request failed" : "Tracker provider response could not be parsed", { provider, url: redactUrl(url.toString()), status: status ?? null, reason: error instanceof Error ? error.message : "Unknown response error" });
+      if (!diagnostics.length || diagnostics.at(-1)?.status !== status) {
+        const request: ProviderRequestDiagnostic = { url: redactUrl(url.toString()), status: status ?? null, recordsFetched: 0 };
+        diagnostics.push(request);
+        console.error("Tracker provider HTTP request failed", { provider, url: request.url, status: status ?? null, message: error instanceof Error ? error.message : "Unknown request error" });
+      }
       if (attempt === 0 && (status === undefined || status === 429 || status >= 500)) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         continue;
       }
+      if (error instanceof Error) Object.assign(error, { providerRequests: diagnostics });
       throw error;
     }
   }
   throw new Error(`${provider} request failed.`);
+}
+
+function setRequestRecordCount(requests: ProviderRequestDiagnostic[], count: number) {
+  const request = requests.at(-1);
+  if (request) request.recordsFetched = Math.max(0, count);
+}
+
+function recordsFetchedFromRequest(requests: ProviderRequestDiagnostic[], count: number) {
+  setRequestRecordCount(requests, count);
+}
+
+function redactUrl(value: string) {
+  try {
+    const url = new URL(value);
+    for (const key of [...url.searchParams.keys()]) {
+      if (/token|secret|key|auth|credential|signature/i.test(key)) url.searchParams.set(key, "[REDACTED]");
+    }
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch { return "[invalid provider URL]"; }
+}
+
+function safeRawPreview(value: unknown): Record<string, string | number | boolean | null> {
+  if (!isRecord(value)) return { value: typeof value === "string" ? scrubPreviewText(value).slice(0, 500) : null };
+  const safe: Record<string, string | number | boolean | null> = {};
+  const allowed = /^(id|objectID|title|text|selftext|body|comment_text|story_text|snippet|description|markdown|url|link|permalink|author|username|subreddit|feed_url|matched_keyword)$/i;
+  for (const [key, item] of Object.entries(value)) {
+    if (!allowed.test(key) || /email|phone|token|secret|credential/i.test(key)) continue;
+    if (typeof item === "string") safe[key] = /^(url|link|permalink|feed_url)$/i.test(key) ? redactUrl(item).slice(0, 500) : scrubPreviewText(item).slice(0, 500);
+    else if (typeof item === "number" || typeof item === "boolean" || item === null) safe[key] = item;
+    if (Object.keys(safe).length >= 12) break;
+  }
+  return safe;
+}
+
+function scrubPreviewText(value: string) {
+  return value
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED EMAIL]")
+    .replace(/(\b(?:token|api[_-]?key|secret|authorization|password)=)[^&\s"']+/gi, "$1[REDACTED]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
 }
 
 function sourcePlatformFromQuery(query: string) {

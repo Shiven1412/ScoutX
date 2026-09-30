@@ -8,7 +8,7 @@ export default async function TrackerRunPage({ params }: { params: Promise<{ id:
   if (!/^[0-9a-f-]{36}$/i.test(id) || !/^[0-9a-f-]{36}$/i.test(runId)) return <p className="text-sm text-slate-400">Tracker run not found.</p>;
   const { supabase, organization } = await requireOrganization();
   const [runResult, trackerResult, eventsResult, signalsResult, rulesResult] = await Promise.all([
-    supabase.from("tracker_runs").select("id, tracker_id, status, progress, signals_found, providers_total, providers_completed, last_error, started_at, completed_at, created_at").eq("id", runId).eq("tracker_id", id).eq("organization_id", organization.id).maybeSingle(),
+    supabase.from("tracker_runs").select("id, tracker_id, status, progress, signals_found, providers_total, providers_completed, last_error, diagnostic_mode, started_at, completed_at, created_at").eq("id", runId).eq("tracker_id", id).eq("organization_id", organization.id).maybeSingle(),
     supabase.from("keyword_trackers").select("id, keyword, platforms, communities").eq("id", id).eq("organization_id", organization.id).maybeSingle(),
     supabase.from("tracker_events").select("id, run_id, event_type, title, details, created_at").eq("run_id", runId).eq("tracker_id", id).eq("organization_id", organization.id).order("created_at", { ascending: false }).limit(40),
     supabase.from("intent_signals").select("id, platform, provider, community, post_snippet, confidence, intent_score, category, keyword, created_at").eq("tracker_id", id).eq("organization_id", organization.id).order("created_at", { ascending: false }).limit(20),
