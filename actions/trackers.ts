@@ -52,8 +52,9 @@ export async function generateTrackerProfile(data: FormData) {
     const profile = await generateBusinessProfileWithGemini({ organizationId: organization.id, businessDescription: description });
     return { profile };
   } catch (error) {
-    console.error("Tracker profile generation failed", error instanceof Error ? error.message : "Unknown error");
-    return { error: "Unable to generate discovery plan. Check the provider configuration and try again." };
+    const message = error instanceof Error ? error.message : "Unknown discovery-plan generation error.";
+    console.error("Tracker profile generation failed", message);
+    return { error: message };
   }
 }
 

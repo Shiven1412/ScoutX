@@ -25,7 +25,7 @@ const sourceOptions: SourceOption[] = [
   { id: "rss", label: "RSS feeds", description: "Add public RSS/Atom URLs in the review step", mode: "Direct feed fetch", icon: Rss },
 ];
 const stepTitles = ["Describe", "Sources", "Review"];
-const emptyGenerated = "Unable to generate discovery plan. Check provider configuration and try again.";
+const emptyGenerated = "Discovery plan response did not match the expected profile schema. Check the server logs for the failing field.";
 
 export function TrackerWizard({ initialDescription = "" }: { initialDescription?: string }) {
   const router = useRouter();

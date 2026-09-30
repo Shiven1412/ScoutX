@@ -166,9 +166,14 @@ export function logGeminiStartupConfiguration() {
   try {
     const env = getServerEnv();
     console.info("Gemini startup validation", {
-      apiKeyDetected: Boolean(env.GEMINI_API_KEY),
+      geminiApiKeyDetected: Boolean(env.GEMINI_API_KEY),
+      openAiFallbackConfigured: Boolean(env.OPENAI_API_KEY),
       selectedModel: env.GEMINI_MODEL,
-      mode: env.GEMINI_API_KEY ? "runtime-validation" : "fail-closed-fallback",
+      mode: env.GEMINI_API_KEY
+        ? "runtime-validation"
+        : env.OPENAI_API_KEY
+          ? "openai-fallback"
+          : "unconfigured",
     });
   } catch (error) {
     console.error("Gemini startup validation failed", {
@@ -192,9 +197,11 @@ async function validateGeminiModel(model: string, apiKey: string) {
       cache: "no-store",
     });
   } catch (error) {
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+    const detail = cause instanceof Error ? cause.message : safeErrorMessage(error);
     throw new GeminiScoringError(
       "provider_unavailable",
-      `Gemini model validation could not reach Google: ${safeErrorMessage(error)}`,
+      `Gemini model validation could not reach Google: ${detail}`,
     );
   }
 
@@ -229,6 +236,7 @@ async function generateGeminiJson<T, Input = unknown>(
   prompt: string,
   schema: z.ZodType<T, z.ZodTypeDef, Input>,
   maxOutputTokens = 1200,
+  debugLabel?: string,
 ): Promise<{ value: T; model: string }> {
   const env = getServerEnv();
   const apiKey = env.GEMINI_API_KEY;
@@ -237,7 +245,7 @@ async function generateGeminiJson<T, Input = unknown>(
   if (!apiKey) {
     throw new GeminiScoringError(
       "missing_api_key",
-      "Gemini is not configured in the server runtime.",
+      "Gemini API key missing. Configure GEMINI_API_KEY or an OPENAI_API_KEY fallback.",
     );
   }
 
@@ -288,14 +296,26 @@ async function generateGeminiJson<T, Input = unknown>(
       assertJsonResponse("Gemini", response.status, contentType, body);
       const envelope = parseJsonStrict(body, "Gemini response envelope");
       const candidateText = getCandidateText(envelope);
+      if (debugLabel && process.env.AI_PROFILE_DEBUG === "true") {
+        console.log("Raw Gemini output", candidateText);
+      }
       const parsed = parseStructuredJson(candidateText, "Gemini");
+      if (debugLabel && process.env.AI_PROFILE_DEBUG === "true") {
+        console.log("Parsed Gemini JSON", parsed);
+      }
       const validated = schema.safeParse(parsed);
 
       if (!validated.success) {
         const issue = validated.error.issues[0];
+        if (debugLabel && process.env.AI_PROFILE_DEBUG === "true") {
+          console.log("Business profile schema issues", validated.error.issues);
+        }
+        const field = issue?.path.join(".") || "root";
         throw new GeminiScoringError(
           "response_parse_failed",
-          `Gemini JSON failed schema validation at '${issue?.path.join(".") || "root"}': ${issue?.message ?? "invalid response"}.`,
+          debugLabel
+            ? `businessProfileSchema validation failed: ${field} — ${issue?.message ?? "invalid response"}.`
+            : `Gemini JSON failed schema validation at '${field}': ${issue?.message ?? "invalid response"}.`,
         );
       }
 
@@ -1074,6 +1094,7 @@ export async function generateBusinessProfile(input: {
       prompt,
       businessProfileSchema,
       4096,
+      "Business profile",
     );
     return {
       ...value,
@@ -1085,7 +1106,11 @@ export async function generateBusinessProfile(input: {
   } catch (geminiError) {
     if (isUsageOrSubscriptionError(geminiError)) throw geminiError;
     const env = getServerEnv();
-    if (!env.OPENAI_API_KEY) throw geminiError;
+    if (!env.OPENAI_API_KEY) {
+      throw new Error(profileGenerationErrorMessage(geminiError, "Gemini"), {
+        cause: geminiError,
+      });
+    }
     if (!env.GEMINI_API_KEY) {
       await consumeAiRateLimit(input.organizationId);
       await consumeAiCredit(input.organizationId);
@@ -1100,9 +1125,26 @@ export async function generateBusinessProfile(input: {
         max_output_tokens: 4096,
         text: { format: { type: "json_object" } },
       });
-      const value = businessProfileSchema.parse(
-        parseStructuredJson(response.output_text, "OpenAI"),
-      );
+      const responseText = response.output_text;
+      if (process.env.AI_PROFILE_DEBUG === "true") {
+        console.log("Raw OpenAI business profile output", responseText);
+      }
+      const parsed = parseStructuredJson(responseText, "OpenAI");
+      if (process.env.AI_PROFILE_DEBUG === "true") {
+        console.log("Parsed OpenAI business profile JSON", parsed);
+      }
+      const validation = businessProfileSchema.safeParse(parsed);
+      if (!validation.success) {
+        if (process.env.AI_PROFILE_DEBUG === "true") {
+          console.log("Business profile schema issues", validation.error.issues);
+        }
+        const issue = validation.error.issues[0];
+        const field = issue?.path.join(".") || "root";
+        throw new Error(
+          `OpenAI fallback validation failed: ${field} — ${issue?.message ?? "invalid response"}.`,
+        );
+      }
+      const value = validation.data;
       return {
         ...value,
         businessDescription: input.businessDescription,
@@ -1111,14 +1153,45 @@ export async function generateBusinessProfile(input: {
         promptVersion: BUSINESS_PROFILE_PROMPT_VERSION,
       };
     } catch (openAiError) {
+      const message = profileGenerationErrorMessage(openAiError, "OpenAI fallback");
       console.error("AI tracker profile fallback failed", {
-        message: safeErrorMessage(openAiError),
+        message,
       });
-      throw new Error(
-        "Unable to generate a discovery plan. The configured AI providers are unavailable or returned invalid structured data.",
-      );
+      throw new Error(message, { cause: openAiError });
     }
   }
+}
+
+function profileGenerationErrorMessage(error: unknown, provider: "Gemini" | "OpenAI fallback") {
+  const message = safeErrorMessage(error);
+  if (/SELF_SIGNED_CERT_IN_CHAIN|self-signed certificate in certificate chain|unable to verify the first certificate/i.test(message)) {
+    return `${provider} TLS certificate validation failed because the certificate chain contains an untrusted certificate. Configure Node.js to trust your organization's proxy/root CA, or bypass the intercepting proxy for generativelanguage.googleapis.com. Do not disable TLS verification.`;
+  }
+  if (error instanceof GeminiScoringError) {
+    if (error.code === "missing_api_key") return message;
+    if (error.code === "model_unavailable") {
+      return `Gemini model unavailable (${getServerEnv().GEMINI_MODEL}). Set GEMINI_MODEL to a model enabled for this API key.`;
+    }
+    if (error.code === "response_parse_failed") {
+      if (/HTML|non-JSON/i.test(message)) return `${provider} returned HTML instead of JSON. Check proxy rules and provider endpoint access.`;
+      if (/empty/i.test(message)) return `${provider} returned an empty response.`;
+      if (/malformed/i.test(message)) return `${provider} returned malformed JSON.`;
+      return message;
+    }
+    if (error.code === "provider_unavailable") {
+      if (/HTML|gateway|policy page/i.test(message)) return "Gemini returned HTML instead of JSON. Check proxy rules and provider endpoint access.";
+      return `${provider} is unavailable: ${message}`;
+    }
+    if (error.code === "invalid_api_key") return "Gemini rejected GEMINI_API_KEY. Verify the key and API access.";
+  }
+  if (provider === "OpenAI fallback" && /businessProfileSchema validation failed/i.test(message)) {
+    return message.replace("businessProfileSchema validation failed", "OpenAI fallback validation failed");
+  }
+  if (provider === "OpenAI fallback" && error instanceof GeminiScoringError) {
+    if (/HTML|non-JSON/i.test(message)) return "OpenAI fallback returned HTML instead of JSON.";
+    if (/malformed/i.test(message)) return "OpenAI fallback returned malformed JSON.";
+  }
+  return message || `${provider} failed without returning an error message.`;
 }
 
 function buildBusinessProfilePrompt(businessDescription: string) {
