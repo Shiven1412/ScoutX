@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { deleteTracker, setTrackerStatus } from "@/actions/trackers";
 import { ActionButton } from "@/components/forms/action-button";
+import { TrackerRerunButton } from "@/components/forms/tracker-rerun-button";
 import { requireOrganization } from "@/lib/organization";
 
 export default async function TrackerDetailPage({ params }: { params: Promise<{ id: string }> }) {
