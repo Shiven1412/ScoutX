@@ -17,7 +17,7 @@ const serverSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: optionalSecret,
   OPENAI_API_KEY: optionalSecret,
   GEMINI_API_KEY: optionalSecret,
-  GEMINI_MODEL: z.preprocess(blankAsUndefined, z.string().min(1).default("gemini-2.5-flash")),
+  GEMINI_MODEL: z.preprocess(blankAsUndefined, z.string().min(1).default("gemini-3.8-flash")),
   SLACK_CLIENT_ID: optionalSecret,
   SLACK_CLIENT_SECRET: optionalSecret,
   HUBSPOT_CLIENT_ID: optionalSecret,

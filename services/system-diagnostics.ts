@@ -51,7 +51,7 @@ export async function runSystemDiagnostics(): Promise<SystemDiagnostic[]> {
       name: "Gemini AI",
       variables: [["GEMINI_API_KEY", Boolean(env.GEMINI_API_KEY)]],
       probeReady: Boolean(env.GEMINI_API_KEY),
-      probe: () => fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash", { headers: { "x-goog-api-key": env.GEMINI_API_KEY! }, signal: timeoutSignal() }),
+      probe: () => fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash", { headers: { "x-goog-api-key": env.GEMINI_API_KEY! }, signal: timeoutSignal() }),
     },
     {
       name: "OpenAI fallback",
