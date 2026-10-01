@@ -1024,14 +1024,8 @@ function assertOutreachEligible(input: OutreachInput) {
   ) {
     throw new OutreachNotRecommendedError("Not a qualified sales opportunity.");
   }
-  if (
-    !input.seller.productName.trim() ||
-    !input.seller.description.trim() ||
-    !input.seller.valueProposition.trim()
-  ) {
-    throw new OutreachNotRecommendedError(
-      "Seller product context is required before outreach can be generated.",
-    );
+  if (!input.seller.productName.trim()) {
+    throw new OutreachNotRecommendedError("A product or service keyword is required to draft relevant outreach.");
   }
 }
 
@@ -1052,6 +1046,8 @@ NON-NEGOTIABLE RULES
 - Refer naturally to the public problem or request, without sounding invasive.
 - Explain relevance in one concrete sentence.
 - Use a low-friction CTA grounded in the seller's supplied call to action.
+- If seller description or value proposition is blank, use only the product/service keyword as context; write a neutral, editable draft with no claims about capabilities, results, or proof.
+- A missing prospect name or company is not a reason to reject a draft; do not invent either.
 - Keep email under 140 words and LinkedIn under 90 words.
 - No hype, buzzword stacking, fake familiarity, or unsupported ROI claims.
 - If prospect context and seller offering do not clearly align, return recommended=false and content="NO_OUTREACH_RECOMMENDED".
@@ -1208,7 +1204,8 @@ RULES
 - intentKeywords: natural phrases expressing recommendation, evaluation, replacement, implementation, purchase, pricing, or urgent help.
 - negativeKeywords: include jobs, hiring, careers, resume, launch, launched, I built, we built, introducing, showcase, Product Hunt, newsletter, tutorial, guide, research, paper, news, affiliate, and promotion where relevant.
 - searchQueries: combine a specific offering/problem with explicit buyer-intent language. Prefer quoted phrases where helpful.
-- subreddits and communities: include only plausible public communities relevant to the target audience. Do not invent names.
+- subreddits: return only subreddit names in canonical r/Name form (for example, r/SaaS); never return bare names, Reddit URLs, descriptions, or combined names. If uncertain, return an empty array.
+- communities: include only plausible public communities relevant to the target audience. Do not invent names.
 - websites: include only plausible public HTTPS discussion, forum, or RSS/feed URLs. Never include localhost, private hosts, login-only areas, or guessed URLs.
 - competitors: include likely direct alternatives only when reasonably clear. Otherwise return an empty array.
 - buyingSignals: observable phrases that indicate a current need or evaluation.

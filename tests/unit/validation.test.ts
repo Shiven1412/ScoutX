@@ -44,8 +44,9 @@ import { readJsonResponse } from "@/lib/http";
       outreachAngles: ["Discuss launch scope and delivery timelines"],
     };
     expect(businessProfileSchema.safeParse(profile).success).toBe(true);
+    expect(businessProfileSchema.parse({ ...profile, subreddits: ["startups", "https://www.reddit.com/r/SaaS/"] }).subreddits).toEqual(["r/startups", "r/SaaS"]);
     expect(businessProfileSchema.safeParse({ ...profile, keywords: [] }).success).toBe(false);
-    expect(businessProfileSchema.safeParse({ ...profile, subreddits: ["startups"] }).success).toBe(false);
+    expect(businessProfileSchema.safeParse({ ...profile, subreddits: ["r/startups and marketing"] }).success).toBe(false);
     expect(businessProfileSchema.safeParse({ ...profile, websites: ["http://localhost/admin"] }).success).toBe(false);
   });
 

@@ -84,7 +84,7 @@ export async function createAiTracker(data: FormData) {
         await runTrackerDiscovery(organization.id, result.tracker_id, result.run_id);
       } catch (error) {
         console.error("Tracker discovery background run failed", error instanceof Error ? error.message : "Unknown error");
-        await markTrackerRunFailed(organization.id, result.tracker_id, result.run_id).catch((persistError) => console.error("Tracker failure state update failed", persistError));
+        await markTrackerRunFailed(organization.id, result.tracker_id, result.run_id, error instanceof Error ? error.message : "Unknown tracker discovery error.").catch((persistError) => console.error("Tracker failure state update failed", persistError));
       }
     });
     revalidatePath("/campaigns");
@@ -123,7 +123,7 @@ export async function createManualTracker(data: FormData) {
       try { await runTrackerDiscovery(organization.id, result.tracker_id, result.run_id); }
       catch (error) {
         console.error("Manual tracker discovery background run failed", error instanceof Error ? error.message : "Unknown error");
-        await markTrackerRunFailed(organization.id, result.tracker_id, result.run_id).catch((persistError) => console.error("Tracker failure state update failed", persistError));
+        await markTrackerRunFailed(organization.id, result.tracker_id, result.run_id, error instanceof Error ? error.message : "Unknown tracker discovery error.").catch((persistError) => console.error("Tracker failure state update failed", persistError));
       }
     });
     revalidatePath("/campaigns");
@@ -170,7 +170,7 @@ export async function rerunTracker(data: FormData) {
       try { await runTrackerDiscovery(organization.id, id, runId); }
       catch (error) {
         console.error("Tracker rerun background execution failed", error instanceof Error ? error.message : "Unknown error");
-        await markTrackerRunFailed(organization.id, id, runId).catch((persistError) => console.error("Tracker failure state update failed", persistError));
+        await markTrackerRunFailed(organization.id, id, runId, error instanceof Error ? error.message : "Unknown tracker discovery error.").catch((persistError) => console.error("Tracker failure state update failed", persistError));
       }
     });
     revalidatePath(`/campaigns/${id}`);

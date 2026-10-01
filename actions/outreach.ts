@@ -35,9 +35,10 @@ export async function generateDraftFromSignal(data: FormData) {
   const { supabase, user, organization } = await requireOrganization();
   const { data: signal, error } = await supabase.from("intent_signals").select("id, prospect_name, company, platform, keyword, source_url, post_snippet, category, intent_score, buying_probability, tracker_id").eq("id", id).eq("organization_id", organization.id).maybeSingle();
   if (error || !signal) return { error: "Signal is unavailable." };
-  if (!signal.tracker_id) return { error: "This signal has no linked seller profile for outreach." };
-  const { data: sellerProfile, error: profileError } = await supabase.from("tracker_profiles").select("business_description, business_summary, target_audience, pain_points").eq("tracker_id", signal.tracker_id).eq("organization_id", organization.id).maybeSingle();
-  if (profileError || !sellerProfile) return { error: "A saved seller profile is required before outreach can be generated." };
+  const { data: sellerProfile, error: profileError } = signal.tracker_id
+    ? await supabase.from("tracker_profiles").select("business_description, business_summary, target_audience, pain_points").eq("tracker_id", signal.tracker_id).eq("organization_id", organization.id).maybeSingle()
+    : { data: null, error: null };
+  if (profileError) return { error: "The seller profile could not be loaded. Please retry." };
   let draft: Awaited<ReturnType<typeof generateOutreachDraft>>;
   try {
     const qualifiedCategory = ["buying_intent", "seeking_alternative", "recommendation_request", "pain_point"].includes(signal.category);
@@ -58,10 +59,10 @@ export async function generateDraftFromSignal(data: FormData) {
       },
       seller: {
         productName: signal.keyword,
-        description: sellerProfile.business_description,
-        valueProposition: sellerProfile.business_summary,
-        targetAudience: sellerProfile.target_audience,
-        painPointsSolved: sellerProfile.pain_points,
+        description: sellerProfile?.business_description ?? "",
+        valueProposition: sellerProfile?.business_summary ?? "",
+        targetAudience: sellerProfile?.target_audience ?? [],
+        painPointsSolved: sellerProfile?.pain_points ?? [],
       },
     });
   } catch (error) {

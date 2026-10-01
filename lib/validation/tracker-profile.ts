@@ -40,6 +40,15 @@ export type ManualTrackerInput = z.infer<typeof manualTrackerSchema>;
 
 const suggestionList = z.array(z.string().trim().min(2).max(240)).max(30).transform((items) => [...new Set(items.map((item) => item.trim()).filter(Boolean))]);
 const productKeywordList = z.array(z.string().trim().min(2).max(240)).min(1).max(20).transform((items) => [...new Set(items.map((item) => item.trim()).filter(Boolean))]);
+const subredditList = z.array(
+  z.string().trim()
+    .transform((value) => {
+      const redditUrl = value.match(/^https?:\/\/(?:www\.)?reddit\.com\/r\/([^/?#]+)\/?$/i);
+      const name = (redditUrl?.[1] ?? value).replace(/^\/?r\//i, "");
+      return `r/${name}`;
+    })
+    .pipe(z.string().regex(/^r\/[A-Za-z0-9_]{2,21}$/, "Use a subreddit name such as r/SaaS.")),
+  ).max(20).transform((items) => [...new Set(items)]);
 const publicWebsiteList = z.array(z.string().trim().url().max(500).refine((value) => {
   try {
     const url = new URL(value);
@@ -57,7 +66,7 @@ export const businessProfileSchema = z.object({
   keywords: productKeywordList,
   intentKeywords: suggestionList,
   negativeKeywords: suggestionList,
-  subreddits: z.array(z.string().trim().regex(/^r\/[A-Za-z0-9_]{2,21}$/)).max(20).transform((items) => [...new Set(items)]),
+  subreddits: subredditList,
   communities: suggestionList,
   websites: publicWebsiteList,
   searchQueries: suggestionList,

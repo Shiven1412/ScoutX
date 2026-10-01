@@ -7,7 +7,9 @@ import { insertSignalBatch, SignalInsertError } from "@/services/signals/persist
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/types/database";
 
-export type ScheduledJob = keyof typeof signalProviders | "reprocess" | "analytics";
+export type ScheduledJob = keyof typeof signalProviders | "reprocess" | "analytics" | "recover";
+const TRACKER_RUN_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+const MAX_TRACKER_RUN_ATTEMPTS = 3;
 
 type SignalProcessingDiagnostics = {
   recordsAnalyzed: number;
@@ -36,18 +38,19 @@ function emptyProcessingDiagnostics(): SignalProcessingDiagnostics {
   return { recordsAnalyzed: 0, recordsScored: 0, recordsAboveThreshold: 0, spamFiltered: 0, batchDuplicates: 0, existingIdDuplicates: 0, existingContentDuplicates: 0, signalsSaved: 0, scoringFallbacks: 0, scoringFallbackReasons: [], scoringFallbackCodes: [], geminiStatus: "not_used", supabaseStatus: "not_attempted" };
 }
 
-export async function markTrackerRunFailed(organizationId: string, trackerId: string, runId: string) {
+export async function markTrackerRunFailed(organizationId: string, trackerId: string, runId: string, reason = "Collection stopped unexpectedly before its providers completed.") {
   const admin = createAdminClient();
   const now = new Date().toISOString();
+  const safeReason = safeSignalProcessingReason(reason);
   const { data: failed, error } = await admin.from("tracker_runs").update({
-    status: "failed", progress: 100, last_error: "Collection stopped unexpectedly. Check provider configuration and retry.", completed_at: now,
+    status: "failed", progress: 100, last_error: safeReason, completed_at: now,
   }).eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organizationId).in("status", ["queued", "running"]).select("id").maybeSingle();
   if (error) {
     console.error("Unexpected tracker run failure could not be persisted", { trackerId, runId, code: error.code });
     return;
   }
   if (!failed) return;
-  await writeTrackerEvent(organizationId, trackerId, runId, "run_failed", "Collection stopped unexpectedly", { reason: "The run stopped before its providers completed. Check server logs and retry." });
+  await writeTrackerEvent(organizationId, trackerId, runId, "run_failed", "Collection stopped unexpectedly", { reason: safeReason });
 }
 
 export async function runScheduledJob(job: ScheduledJob) {
@@ -58,6 +61,7 @@ export async function runScheduledJob(job: ScheduledJob) {
     let processed = 0;
     if (job === "reprocess") processed = await reprocessSignals();
     else if (job === "analytics") processed = await aggregateAnalytics();
+    else if (job === "recover") processed = await recoverStaleTrackerRuns();
     else processed = await collectSignals(job);
     const { error } = await admin.from("cron_job_runs").update({ status: "completed", processed_count: processed, completed_at: new Date().toISOString() }).eq("id", run.id);
     if (error) throw new Error("Scheduled job result could not be recorded.");
@@ -71,9 +75,16 @@ export async function runScheduledJob(job: ScheduledJob) {
 
 export async function runTrackerDiscovery(organizationId: string, trackerId: string, runId: string, onlyProvider?: keyof typeof signalProviders) {
   const admin = createAdminClient();
-  const { data: claimed, error: claimError } = await admin.from("tracker_runs").update({ status: "running", progress: 3, started_at: new Date().toISOString() })
-    .eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organizationId).eq("status", "queued").select("id, diagnostic_mode").maybeSingle();
-  if (claimError) throw new Error("Tracker discovery run could not be started.");
+  const { data: queued, error: queuedError } = await admin.from("tracker_runs").select("attempt_count, started_at").eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organizationId).eq("status", "queued").maybeSingle();
+  if (queuedError) throw new Error(`Tracker discovery run could not be inspected: ${queuedError.message}`);
+  const startedAt = new Date().toISOString();
+  let claim = admin.from("tracker_runs").update({
+    status: "running", progress: 3, started_at: startedAt,
+    attempt_count: (queued?.attempt_count ?? 0) + (queued?.started_at ? 0 : 1),
+  }).eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organizationId).eq("status", "queued").eq("attempt_count", queued?.attempt_count ?? 0);
+  claim = queued?.started_at ? claim.eq("started_at", queued.started_at) : claim.is("started_at", null);
+  const { data: claimed, error: claimError } = await claim.select("id, diagnostic_mode").maybeSingle();
+  if (claimError) throw new Error(`Tracker discovery run could not be started: ${claimError.message}`);
   if (!claimed) {
     const { data: existing } = await admin.from("tracker_runs").select("status").eq("id", runId).eq("organization_id", organizationId).maybeSingle();
     return { status: existing?.status ?? "missing", duplicate: true };
@@ -84,7 +95,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
     .select("id, organization_id, keyword, negative_keywords, communities, platforms, alert_threshold, status, deleted_at")
     .eq("id", trackerId).eq("organization_id", organizationId).maybeSingle();
   if (trackerError || !tracker || tracker.status !== "active" || tracker.deleted_at) {
-    await finishTrackerRun(organizationId, trackerId, runId, "failed", 0, "Tracker is unavailable or paused.");
+    await finishTrackerRun(organizationId, trackerId, runId, "failed", 0, "Tracker is unavailable or paused.", startedAt);
     return { status: "failed", signalsFound: 0 };
   }
 
@@ -94,7 +105,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
     admin.from("tracker_keywords").select("keyword_type, keyword").eq("tracker_id", trackerId).eq("organization_id", organizationId),
   ]);
   if (queryRows.error || sourceRows.error || keywordRows.error) {
-    await finishTrackerRun(organizationId, trackerId, runId, "failed", 0, "Tracker discovery rules could not be loaded.");
+    await finishTrackerRun(organizationId, trackerId, runId, "failed", 0, "Tracker discovery rules could not be loaded.", startedAt);
     return { status: "failed", signalsFound: 0 };
   }
   const enriched: SignalTracker = {
@@ -120,8 +131,9 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
   let failedProviders = 0;
   let recoveredFailures = 0;
   let attemptedProviders = 0;
+  const providerFailureReasons: string[] = [];
   const totalProviders = selected.length;
-  await admin.from("tracker_runs").update({ providers_total: totalProviders, progress: 8 }).eq("id", runId);
+  await admin.from("tracker_runs").update({ providers_total: totalProviders, progress: 8 }).eq("id", runId).eq("started_at", startedAt).eq("status", "running");
 
   for (const providerName of selected) {
     const providerStartedAt = Date.now();
@@ -192,6 +204,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
       failedProviders += 1;
       warningProviders += 1;
       const detail = error instanceof Error ? error.message : "Unknown provider failure";
+      providerFailureReasons.push(`${providerNameLabel(providerName)}: ${safeSignalProcessingReason(detail)}`);
       const reasonCode = providerCollection ? "collection_processing_failed" : providerFailureCode(detail);
       const failedRequests: Json = providerCollection ? providerCollection.requests as unknown as Json : providerRequestsFromError(error);
       const failedRecordsFetched = providerCollection?.recordsFetched ?? requestRecordTotal(failedRequests);
@@ -237,6 +250,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
           console.error("Apify Reddit fallback failed", fallbackError instanceof Error ? fallbackError.message : "Unknown error");
           await admin.from("provider_status").upsert({ organization_id: organizationId, provider: "apify", connected: true, sync_status: "error", updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
           const detail = fallbackError instanceof Error ? fallbackError.message : "Unknown provider failure";
+          providerFailureReasons.push(`Apify fallback: ${safeSignalProcessingReason(detail)}`);
           await writeTrackerEvent(organizationId, trackerId, runId, "provider_failed", "Apify Reddit fallback failed", { provider: "apify", reason: toSafeProviderReason(detail), reasonCode: providerFailureCode(detail), warning: true, recordsFetched: 0, recordsFiltered: 0, signalsGenerated: 0, signalsSaved: 0 });
         }
       }
@@ -260,17 +274,27 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
         } catch (fallbackError) {
           console.error("Public search fallback failed", fallbackError instanceof Error ? fallbackError.message : "Unknown error");
           const detail = fallbackError instanceof Error ? fallbackError.message : "Unknown provider failure";
+          providerFailureReasons.push(`Public search fallback: ${safeSignalProcessingReason(detail)}`);
           await writeTrackerEvent(organizationId, trackerId, runId, "provider_failed", "Public search fallback failed", { provider: "serper", reason: toSafeProviderReason(detail), reasonCode: providerFailureCode(detail), warning: true, recordsFetched: 0, recordsFiltered: 0, signalsGenerated: 0, signalsSaved: 0 });
         }
       }
     }
     const progress = totalProviders ? 8 + Math.floor(attemptedProviders / totalProviders * 88) : 8;
-    await admin.from("tracker_runs").update({ progress, signals_found: insertedTotal, providers_completed: completedProviders }).eq("id", runId);
+    await admin.from("tracker_runs").update({ progress, signals_found: insertedTotal, providers_completed: completedProviders }).eq("id", runId).eq("started_at", startedAt).eq("status", "running");
   }
 
   const status = !selected.length || (completedProviders === 0 && recoveredFailures === 0) ? "failed" : failedProviders > recoveredFailures || warningProviders > 0 ? "partial" : "completed";
   const warning = warningProviders > 0 || recordsFetchedTotal === 0 || signalsGeneratedTotal === 0;
-  await finishTrackerRun(organizationId, trackerId, runId, status, insertedTotal, status === "failed" ? "No selected discovery provider completed successfully." : null);
+  const failureReason = providerFailureReasons.join("; ").slice(0, 450);
+  await finishTrackerRun(
+    organizationId,
+    trackerId,
+    runId,
+    status,
+    insertedTotal,
+    status === "failed" ? failureReason || "No selected discovery provider completed successfully." : failedProviders > recoveredFailures ? failureReason : null,
+    startedAt,
+  );
   await writeTrackerEvent(organizationId, trackerId, runId, "run_completed", status === "completed" ? "Collection complete" : status === "partial" ? "Collection complete with warnings" : "Collection could not start", {
     status, warning, diagnosticMode, signalsFound: insertedTotal, recordsFetched: recordsFetchedTotal, recordsFiltered: recordsFilteredTotal,
     signalsGenerated: signalsGeneratedTotal, recordsAnalyzed: recordsAnalyzedTotal, recordsScored: recordsScoredTotal,
@@ -300,9 +324,9 @@ async function scoreDeduplicateAndIngest(tracker: SignalTracker, providerName: k
   await writeTrackerEvent(tracker.organization_id, tracker.id, runId, "signal_processing_stage", "Records analyzed", { provider: providerName, stage: "keyword_filter_and_batch_dedupe", normalized: records.length, spamFiltered: diagnostics.spamFiltered, batchDuplicates: diagnostics.batchDuplicates, recordsAnalyzed: 0 });
   if (!unique.length) return { inserted: 0, filtered: records.length, scoringFallbacks: 0, scoringFallbackReasons: [] as string[], diagnostics };
   const candidateHashes = new Map(unique.map((signal) => [`${signal.platform}:${signal.external_id}`, contentHash(signal.post_snippet)]));
-  const [existingIds, existingHashes] = await Promise.all([
+    const [existingIds, existingHashes] = await Promise.all([
     admin.from("intent_signals").select("platform, external_id").eq("organization_id", tracker.organization_id).in("platform", [...new Set(unique.map((signal) => signal.platform))]).in("external_id", unique.map((signal) => signal.external_id)),
-    admin.from("intent_signals").select("content_hash").eq("organization_id", tracker.organization_id).in("content_hash", [...candidateHashes.values()]),
+      admin.from("intent_signals").select("keyword, content_hash").eq("organization_id", tracker.organization_id).in("content_hash", [...candidateHashes.values()]),
   ]);
   if (existingIds.error || existingHashes.error) {
     const dbError = existingIds.error ?? existingHashes.error;
@@ -311,17 +335,20 @@ async function scoreDeduplicateAndIngest(tracker: SignalTracker, providerName: k
   }
   const seenIds = new Set(existingIds.data?.map((row) => `${row.platform}:${row.external_id}`) ?? []);
   const seenHashes = new Set(existingHashes.data?.map((row) => row.content_hash).filter((value): value is string => Boolean(value)) ?? []);
+  const savedKeywordHashes = new Set(existingHashes.data?.map((row) => `${row.keyword}:${row.content_hash}`) ?? []);
+  let savedSameKeywordMatches = 0;
   const fresh = unique.filter((signal) => {
     const hash = candidateHashes.get(`${signal.platform}:${signal.external_id}`) ?? "";
     const existingId = seenIds.has(`${signal.platform}:${signal.external_id}`);
     const existingHash = seenHashes.has(hash);
+    if (savedKeywordHashes.has(`${signal.keyword}:${hash}`)) savedSameKeywordMatches += 1;
     if (existingId) diagnostics.existingIdDuplicates += 1;
     else if (existingHash) diagnostics.existingContentDuplicates += 1;
     return !existingId && !existingHash;
   });
   diagnostics.recordsAnalyzed = fresh.length;
   console.info("Signal processing stage", { stage: "database_dedupe", trackerId: tracker.id, provider: providerName, candidates: unique.length, existingIdDuplicates: diagnostics.existingIdDuplicates, existingContentDuplicates: diagnostics.existingContentDuplicates, recordsAnalyzed: fresh.length });
-  await writeTrackerEvent(tracker.organization_id, tracker.id, runId, "signal_processing_stage", "Existing signals checked", { provider: providerName, stage: "database_dedupe", candidates: unique.length, existingIdDuplicates: diagnostics.existingIdDuplicates, existingContentDuplicates: diagnostics.existingContentDuplicates, recordsAnalyzed: fresh.length });
+  await writeTrackerEvent(tracker.organization_id, tracker.id, runId, "signal_processing_stage", "Existing signals checked", { provider: providerName, stage: "database_dedupe", candidates: unique.length, existingIdDuplicates: diagnostics.existingIdDuplicates, existingContentDuplicates: diagnostics.existingContentDuplicates, savedSameKeywordMatches, recordsAnalyzed: fresh.length });
   const scored: Array<CollectedSignal & Awaited<ReturnType<typeof scoreIntent>> & { content_hash: string; provider: string; community: string | null }> = [];
   for (const signal of fresh) {
     const title = typeof signal.raw_payload.title === "string" ? signal.raw_payload.title : "";
@@ -332,7 +359,7 @@ async function scoreDeduplicateAndIngest(tracker: SignalTracker, providerName: k
     scored.push({ ...signal, ...score, content_hash: hash, provider: providerName, community });
     diagnostics.recordsScored += 1;
     if (score.intent_score >= (tracker.alert_threshold ?? 75)) diagnostics.recordsAboveThreshold += 1;
-    if (score.model === "keyword-fallback") {
+    if (score.model === "deterministic-fallback") {
       diagnostics.scoringFallbacks += 1;
       if ("fallbackReason" in score && typeof score.fallbackReason === "string") diagnostics.scoringFallbackReasons = [...new Set([...diagnostics.scoringFallbackReasons, score.fallbackReason])];
       if ("fallbackCode" in score && typeof score.fallbackCode === "string") diagnostics.scoringFallbackCodes = [...new Set([...diagnostics.scoringFallbackCodes, score.fallbackCode])];
@@ -409,9 +436,77 @@ async function writeTrackerEvent(organizationId: string, trackerId: string, runI
   if (error) console.error("Tracker event could not be persisted", { code: error.code, eventType });
 }
 
-async function finishTrackerRun(organizationId: string, trackerId: string, runId: string, status: "completed" | "partial" | "failed", signalsFound: number, lastError: string | null) {
-  const { error } = await createAdminClient().from("tracker_runs").update({ status, progress: 100, signals_found: signalsFound, completed_at: new Date().toISOString(), last_error: lastError }).eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organizationId);
+async function finishTrackerRun(organizationId: string, trackerId: string, runId: string, status: "completed" | "partial" | "failed", signalsFound: number, lastError: string | null, startedAt: string) {
+  const { error } = await createAdminClient().from("tracker_runs").update({ status, progress: 100, signals_found: signalsFound, completed_at: new Date().toISOString(), last_error: lastError }).eq("id", runId).eq("tracker_id", trackerId).eq("organization_id", organizationId).eq("started_at", startedAt).eq("status", "running");
   if (error) console.error("Tracker run completion could not be persisted", { code: error.code, trackerId });
+}
+
+async function recoverStaleTrackerRuns() {
+  const admin = createAdminClient();
+  const now = Date.now();
+  const cutoff = new Date(now - TRACKER_RUN_STALE_AFTER_MS).toISOString();
+  const { data: runs, error } = await admin.from("tracker_runs")
+    .select("id, organization_id, tracker_id, status, attempt_count, started_at, completed_at, created_at, last_error")
+    .in("status", ["queued", "running", "partial", "failed"])
+    .order("created_at", { ascending: true })
+    .limit(100);
+  if (error) throw new Error(`Stale tracker runs could not be checked: ${error.message}`);
+
+  let recovered = 0;
+  for (const run of runs ?? []) {
+    const staleAt = run.status === "running"
+      ? run.started_at
+      : run.status === "queued"
+        ? run.started_at ?? run.created_at
+        : run.completed_at;
+    if (!staleAt || staleAt >= cutoff) continue;
+    if ((run.status === "partial" || run.status === "failed") && !run.last_error) continue;
+
+    const lastReason = safeSignalProcessingReason(run.last_error ?? "The tracker run stopped responding before completion.");
+    if (run.attempt_count >= MAX_TRACKER_RUN_ATTEMPTS) {
+      if (run.status === "failed") continue;
+      const finalReason = `Tracker failed after ${MAX_TRACKER_RUN_ATTEMPTS} attempts. Last failure: ${lastReason}`.slice(0, 500);
+      let terminalUpdate = admin.from("tracker_runs").update({
+        status: "failed", progress: 100, completed_at: new Date().toISOString(), last_error: finalReason,
+      }).eq("id", run.id).eq("organization_id", run.organization_id).eq("tracker_id", run.tracker_id).eq("status", run.status).eq("attempt_count", run.attempt_count);
+      terminalUpdate = run.status === "running"
+        ? terminalUpdate.eq("started_at", run.started_at!)
+        : run.status === "queued"
+          ? run.started_at ? terminalUpdate.eq("started_at", run.started_at) : terminalUpdate.is("started_at", null)
+          : terminalUpdate.eq("completed_at", run.completed_at!);
+      const { data: failed, error: failError } = await terminalUpdate.select("id").maybeSingle();
+      if (failError) throw new Error(`Exhausted tracker run ${run.id} could not be marked failed: ${failError.message}`);
+      if (failed) {
+        await writeTrackerEvent(run.organization_id, run.tracker_id, run.id, "run_failed", "Tracker failed after three attempts", { attempts: run.attempt_count, reason: finalReason });
+      }
+      continue;
+    }
+
+    const retryAttempt = run.attempt_count + 1;
+    const retryStartedAt = new Date().toISOString();
+    let retryUpdate = admin.from("tracker_runs").update({
+      status: "queued", progress: 0, providers_completed: 0, started_at: retryStartedAt,
+      completed_at: null, attempt_count: retryAttempt, last_error: lastReason,
+    }).eq("id", run.id).eq("organization_id", run.organization_id).eq("tracker_id", run.tracker_id).eq("status", run.status).eq("attempt_count", run.attempt_count);
+    retryUpdate = run.status === "running"
+      ? retryUpdate.eq("started_at", run.started_at!)
+      : run.status === "queued"
+        ? run.started_at ? retryUpdate.eq("started_at", run.started_at) : retryUpdate.is("started_at", null)
+        : retryUpdate.eq("completed_at", run.completed_at!);
+    const { data: queued, error: retryError } = await retryUpdate.select("id").maybeSingle();
+    if (retryError) throw new Error(`Stale tracker run ${run.id} could not be queued for retry: ${retryError.message}`);
+    if (!queued) continue;
+
+    recovered += 1;
+    await writeTrackerEvent(run.organization_id, run.tracker_id, run.id, "run_retry_scheduled", `Restarting tracker run (attempt ${retryAttempt} of ${MAX_TRACKER_RUN_ATTEMPTS})`, { attempt: retryAttempt, previousStatus: run.status, reason: lastReason });
+    try {
+      await runTrackerDiscovery(run.organization_id, run.tracker_id, run.id);
+    } catch (retryFailure) {
+      const reason = retryFailure instanceof Error ? retryFailure.message : "Unknown tracker retry failure.";
+      await markTrackerRunFailed(run.organization_id, run.tracker_id, run.id, reason);
+    }
+  }
+  return recovered;
 }
 
 function providerNameLabel(provider: keyof typeof signalProviders) {
