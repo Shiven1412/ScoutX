@@ -7,6 +7,6 @@
     { "path": "/api/cron/hackernews", "schedule": "0 9 * * *" },
     { "path": "/api/cron/reprocess", "schedule": "0 11 * * *" },
     { "path": "/api/cron/analytics", "schedule": "0 2 * * *" },
-    { "path": "/api/cron/recover", "schedule": "*/15 * * * *" }
+    { "path": "/api/cron/recover", "schedule": "0 0 * * *" }
   ]
 }
