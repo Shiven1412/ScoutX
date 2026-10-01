@@ -6,6 +6,7 @@ import { Activity, Check, Play } from "lucide-react";
 import { createManualTracker, updateTracker } from "@/actions/trackers";
 import { Button } from "@/components/ui/button";
 import { FormField, Input } from "@/components/ui/form-field";
+import { defaultExcludedCategories, signalCategoryIds } from "@/lib/validation/tracker-profile";
 
 const providers = [
   { id: "reddit", label: "Reddit API", note: "Public posts in selected subreddits" },
@@ -26,10 +27,11 @@ export type ManualTrackerValues = {
   websites: string[];
   queries: string[];
   alertThreshold: number;
+  excludedCategories: string[];
 };
 
 const emptyValues: ManualTrackerValues = {
-  keyword: "", keywords: [], intentKeywords: [], negativeKeywords: [], communities: [], sources: ["reddit"], websites: [], queries: [], alertThreshold: 75,
+  keyword: "", keywords: [], intentKeywords: [], negativeKeywords: [], communities: [], sources: ["reddit"], websites: [], queries: [], alertThreshold: 75, excludedCategories: [...defaultExcludedCategories],
 };
 
 export function TrackerManualForm({ initialValues = emptyValues, mode = "create" }: { initialValues?: ManualTrackerValues; mode?: "create" | "edit" }) {
@@ -51,6 +53,7 @@ export function TrackerManualForm({ initialValues = emptyValues, mode = "create"
     form.set("websites", values.websites.join("\n"));
     form.set("queries", values.queries.join("\n"));
     form.set("alertThreshold", String(values.alertThreshold));
+    for (const category of values.excludedCategories) form.append("excludedCategories", category);
     for (const source of values.sources) form.append("sources", source);
     startTransition(async () => {
       try {
@@ -94,6 +97,7 @@ export function TrackerManualForm({ initialValues = emptyValues, mode = "create"
     <ListField label="Public websites or RSS feed URLs" value={values.websites} onChange={(value) => setList("websites", value)} placeholder="https://example.com/feed.xml" help="Use HTTPS URLs. Websites require Website scraping; feed URLs require RSS feeds." />
     <ListField label="Search queries" value={values.queries} onChange={(value) => setList("queries", value)} placeholder="Optional extra search query per line" />
     <FormField label="Alert threshold (%)"><Input type="number" min={0} max={100} value={values.alertThreshold} onChange={(event) => setValues({ ...values, alertThreshold: Number(event.target.value) })} /></FormField>
+    <fieldset className="space-y-3"><legend className="text-sm font-medium">Ignore signals from selected categories</legend><p className="text-xs text-slate-500">Matching signals are scored but not saved. Default exclusions are selected for new trackers.</p><div className="grid gap-2 sm:grid-cols-2">{signalCategoryIds.map((category) => <label key={category} className="flex items-center gap-2 rounded-lg border border-white/10 bg-slate-950/30 px-3 py-2 text-sm"><input type="checkbox" value={category} checked={values.excludedCategories.includes(category)} onChange={(event) => setValues((current) => ({ ...current, excludedCategories: event.target.checked ? [...current.excludedCategories, category] : current.excludedCategories.filter((item) => item !== category) }))} className="accent-indigo-400" /><span>{category.replaceAll("_", " ")}</span></label>)}</div></fieldset>
     {error && <p role="alert" className="rounded-lg border border-red-300/20 bg-red-300/[.06] p-3 text-sm text-red-200">{error}</p>}
     <div className="flex justify-end border-t border-white/10 pt-5"><Button type="submit" disabled={pending}>{pending ? "Saving…" : mode === "edit" ? <><Check className="mr-2 size-4" />Save tracker</> : <>Create and run tracker <Play className="ml-2 size-4" /></>}</Button></div>
   </form>;

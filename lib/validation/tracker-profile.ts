@@ -14,6 +14,8 @@ export const discoveryBackendBySource = {
   websites: "firecrawl",
   rss: "rss",
 } as const;
+export const signalCategoryIds = ["ignore", "product_launch", "self_promotion", "thought_leadership", "career_discussion", "general_discussion", "buying_intent", "seeking_alternative", "recommendation_request", "pain_point", "feature_request"] as const;
+export const defaultExcludedCategories = ["ignore", "product_launch", "self_promotion", "career_discussion"] as const;
 export const discoverySourcesSchema = z.array(z.enum(discoverySourceIds)).min(1, "Select at least one discovery source.").max(discoverySourceIds.length).transform((items) => [...new Set(items)]);
 
 const manualList = z.array(z.string().trim().min(2).max(240)).max(30).transform((items) => [...new Set(items)]);
@@ -35,6 +37,7 @@ export const manualTrackerSchema = z.object({
   websites: manualWebsiteList,
   queries: manualList,
   alertThreshold: z.coerce.number().int().min(0).max(100),
+  excludedCategories: z.array(z.enum(signalCategoryIds)).max(signalCategoryIds.length).default([...defaultExcludedCategories]).transform((items) => [...new Set(items)]),
 });
 export type ManualTrackerInput = z.infer<typeof manualTrackerSchema>;
 

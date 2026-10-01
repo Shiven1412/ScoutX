@@ -10,6 +10,7 @@ const publicSchema = z.object({
   NEXT_PUBLIC_SUPABASE_ANON_KEY: optionalSecret,
   NEXT_PUBLIC_POSTHOG_KEY: z.preprocess(blankAsUndefined, z.string().optional()),
   NEXT_PUBLIC_POSTHOG_HOST: z.preprocess(blankAsUndefined, z.string().url().default("https://us.i.posthog.com")),
+  NEXT_PUBLIC_DEMO_BOOKING_URL: z.preprocess(blankAsUndefined, z.string().url().refine((value) => value.startsWith("https://"), "Demo booking URL must use HTTPS.").optional()),
   NEXT_PUBLIC_SENTRY_DSN: optionalUrl,
 });
 
@@ -54,6 +55,7 @@ export function getPublicEnv() {
     NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     NEXT_PUBLIC_POSTHOG_KEY: process.env.NEXT_PUBLIC_POSTHOG_KEY,
     NEXT_PUBLIC_POSTHOG_HOST: process.env.NEXT_PUBLIC_POSTHOG_HOST,
+    NEXT_PUBLIC_DEMO_BOOKING_URL: process.env.NEXT_PUBLIC_DEMO_BOOKING_URL,
     NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN,
   });
 }

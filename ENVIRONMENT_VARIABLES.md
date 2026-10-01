@@ -29,6 +29,7 @@ Copy `.env.example` to `.env.local` for local development. Configure the same na
 | `WEBHOOK_ENCRYPTION_KEY` | No | Slack/HubSpot and webhook credential encryption | Base64-encoded random 32-byte key. Back it up securely; losing it requires provider reconnection. |
 | `NEXT_PUBLIC_POSTHOG_KEY` | Yes | Pageview analytics | Optional. Pageviews only; autocapture and recordings are disabled. |
 | `NEXT_PUBLIC_POSTHOG_HOST` | Yes | PostHog endpoint | Defaults to `https://us.i.posthog.com`; change for your data region/self-hosted endpoint. |
+| `NEXT_PUBLIC_DEMO_BOOKING_URL` | Yes | Public landing-page demo booking | Optional HTTPS scheduling link. The landing-page button is disabled until this is configured. |
 | `NEXT_PUBLIC_SENTRY_DSN` | Yes | Error monitoring | Optional DSN; no default PII. |
 | `CRON_SECRET` | No | Vercel scheduled collectors | At least 32 characters. Vercel sends this as a Bearer token to the authenticated `/api/cron/*` endpoints. |
 

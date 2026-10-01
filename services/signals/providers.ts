@@ -4,6 +4,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { getServerEnv } from "@/lib/env";
 import { readJsonResponse } from "@/lib/http";
+import { isRecentSignal } from "@/services/signals/recency";
 
 export type SignalTracker = {
   id: string;
@@ -13,6 +14,7 @@ export type SignalTracker = {
   communities: string[];
   platforms: string[];
   alert_threshold?: number;
+  excluded_categories?: string[];
   keywords?: string[];
   queries?: string[];
   sources?: Array<{ source_type: string; provider: string; source_value: string }>;
@@ -26,6 +28,7 @@ export type CollectedSignal = {
   company: string | null;
   source_url: string | null;
   post_snippet: string;
+  source_created_at?: string;
   raw_payload: Record<string, string | number | boolean>;
   tracker_id: string;
 };
@@ -35,6 +38,8 @@ export type ProviderCollectionResult = {
   signals: CollectedSignal[];
   recordsFetched: number;
   recordsFiltered: number;
+  signalsFilteredOld: number;
+  signalsFilteredUndated: number;
   requests: ProviderRequestDiagnostic[];
   rawPreview: Array<Record<string, string | number | boolean | null>>;
   warnings: string[];
@@ -56,19 +61,36 @@ abstract class BaseSignalProvider implements SignalProvider {
   abstract healthCheck(): Promise<boolean>;
 
   collectionResult(signals: CollectedSignal[], recordsFetched: number, records: unknown[], requests: ProviderRequestDiagnostic[], missingSource = false, warnings: string[] = []): ProviderCollectionResult {
-    const recordsFiltered = Math.max(0, recordsFetched - signals.length);
+    let signalsFilteredOld = 0;
+    let signalsFilteredUndated = 0;
+    const recentSignals = signals.filter((signal) => {
+      if (!signal.source_created_at) {
+        signalsFilteredUndated += 1;
+        console.info("Signal skipped because its publication date could not be verified", { provider: this.name });
+        return false;
+      }
+      if (!isRecentSignal(signal.source_created_at)) {
+        signalsFilteredOld += 1;
+        console.info("Signal skipped because it is older than 6 months", { provider: this.name, sourceCreatedAt: signal.source_created_at });
+        return false;
+      }
+      return true;
+    });
+    const recordsFiltered = Math.max(0, recordsFetched - recentSignals.length);
     const rateLimited = requests.some((request) => request.status === 429);
     const requestFailed = requests.some((request) => request.status === null || request.status < 200 || request.status >= 300);
     const result: ProviderCollectionResult = {
-      signals,
+      signals: recentSignals,
       recordsFetched,
       recordsFiltered,
+      signalsFilteredOld,
+      signalsFilteredUndated,
       requests,
       rawPreview: records.slice(0, 10).map(safeRawPreview),
       warnings,
-      zeroReason: signals.length ? null : missingSource ? "missing_source_list" : rateLimited ? "rate_limited" : warnings.length || (recordsFetched > 0 && signals.length === 0) ? "parser_failure" : requestFailed ? "provider_request_failed" : recordsFetched ? "parser_failure" : "api_response_empty",
+      zeroReason: recentSignals.length ? null : missingSource ? "missing_source_list" : rateLimited ? "rate_limited" : warnings.length || (recordsFetched > 0 && recentSignals.length === 0) ? "parser_failure" : requestFailed ? "provider_request_failed" : recordsFetched ? "parser_failure" : "api_response_empty",
     };
-    console.log("Tracker provider collection summary", { provider: this.name, recordsFetched, recordsFiltered, signalsProduced: signals.length, zeroReason: result.zeroReason, requests });
+    console.log("Tracker provider collection summary", { provider: this.name, recordsFetched, recordsFiltered, signalsProduced: recentSignals.length, signalsFilteredOld, signalsFilteredUndated, zeroReason: result.zeroReason, requests });
     return result;
   }
 
@@ -88,6 +110,7 @@ abstract class BaseSignalProvider implements SignalProvider {
         company: null,
         source_url: isPublicHttpUrl(url) ? url : null,
         post_snippet: snippet.slice(0, 10_000),
+        source_created_at: sourceDateFromRecord(record),
         raw_payload: pickSafePayload(record),
         tracker_id: tracker.id,
       }];
@@ -216,7 +239,7 @@ export class SerperSignalProvider extends BaseSignalProvider {
         const externalId = getString(record, ["link", "url", "title"]);
         const snippet = [getString(record, ["title"]), getString(record, ["snippet"]), getString(record, ["description"])].filter(Boolean).join("\n");
         if (!externalId || snippet.length < 20) continue;
-        collected.push({ platform: sourcePlatformFromQuery(query), external_id: externalId.slice(0, 500), keyword: query, prospect_name: null, company: null, source_url: isPublicHttpUrl(url) ? url : null, post_snippet: snippet.slice(0, 10_000), raw_payload: pickSafePayload(record), tracker_id: tracker.id });
+        collected.push({ platform: sourcePlatformFromQuery(query), external_id: externalId.slice(0, 500), keyword: query, prospect_name: null, company: null, source_url: isPublicHttpUrl(url) ? url : null, post_snippet: snippet.slice(0, 10_000), source_created_at: sourceDateFromRecord(record), raw_payload: pickSafePayload(record), tracker_id: tracker.id });
       }
     }
     return this.collectionResult(collected, recordsFetched, rawRecords, requests, queries.length === 0);
@@ -253,7 +276,7 @@ export class FirecrawlSignalProvider extends BaseSignalProvider {
           const metadata = isRecord(data.metadata) ? data.metadata : {};
           const isFeed = /\.(rss|xml|atom)(?:$|\?)/i.test(new URL(url).pathname) || /\b(feed|rss|atom)\b/i.test(url);
           if (isFeed) records.push(...parseFeedRecords(url, data.rawHtml ?? data.html ?? data.markdown));
-          else records.push({ id: url, url, markdown: data.markdown, title: metadata.title });
+          else records.push({ id: url, url, markdown: data.markdown, title: metadata.title, published_at: firstString(metadata, ["publishedTime", "article:published_time", "datePublished", "dateCreated", "date"]), updated_at: firstString(metadata, ["modifiedTime", "article:modified_time", "dateModified"]) });
         } catch (error) {
           const warning = error instanceof Error ? error.message : "Unknown provider error";
           warnings.push(`${redactUrl(url)}: ${warning}`.slice(0, 500));
@@ -402,7 +425,7 @@ export class HackerNewsSignalProvider extends BaseSignalProvider {
         if (!id || content.replace(/<[^>]*>/g, " ").trim().length < 20) continue;
         const storyUrl = getString(hit, ["url", "story_url"]);
         const itemUrl = `https://news.ycombinator.com/item?id=${encodeURIComponent(id)}`;
-        signals.push({ platform: "hackernews", external_id: id, keyword: query, prospect_name: getString(hit, ["author"]) || null, company: null, source_url: isPublicHttpUrl(storyUrl) ? storyUrl : itemUrl, post_snippet: content.replace(/<[^>]*>/g, " ").slice(0, 10_000), raw_payload: pickSafePayload(hit), tracker_id: tracker.id });
+        signals.push({ platform: "hackernews", external_id: id, keyword: query, prospect_name: getString(hit, ["author"]) || null, company: null, source_url: isPublicHttpUrl(storyUrl) ? storyUrl : itemUrl, post_snippet: content.replace(/<[^>]*>/g, " ").slice(0, 10_000), source_created_at: sourceDateFromRecord(hit), raw_payload: pickSafePayload(hit), tracker_id: tracker.id });
       }
     }
     return this.collectionResult(signals, recordsFetched, rawRecords, requests, queries.length === 0);
@@ -529,12 +552,46 @@ function parseFeedRecords(feedUrl: string, value: unknown): unknown[] {
   return blocks.slice(0, 25).flatMap((block, index) => {
     const title = xmlText(block, "title");
     const description = xmlText(block, "description") || xmlText(block, "summary") || xmlText(block, "content:encoded") || xmlText(block, "content");
+    const publishedAt = xmlText(block, "pubDate") || xmlText(block, "published") || xmlText(block, "updated") || xmlText(block, "dc:date");
     const linkTag = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*\/?\s*>/i);
     const link = xmlText(block, "link") || linkTag?.[1] || "";
     const id = xmlText(block, "guid") || xmlText(block, "id") || link || `${feedUrl}#item-${index}`;
     const body = [title, description].filter(Boolean).join("\n");
-    return body.length >= 20 ? [{ id, url: link, title, description: body, feed_url: feedUrl }] : [];
+    return body.length >= 20 ? [{ id, url: link, title, description: body, feed_url: feedUrl, published_at: publishedAt }] : [];
   });
+}
+function firstString(value: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
+  return "";
+}
+function sourceDateFromRecord(record: Record<string, unknown>) {
+  for (const key of ["source_created_at", "published_at", "publishedAt", "pubDate", "created_at", "createdAt", "created_utc", "created_at_i", "timestamp", "datePublished", "date"]) {
+    const value = record[key];
+    if (typeof value !== "string" && typeof value !== "number") continue;
+    if (typeof value === "string") {
+      const relative = value.trim().match(/^(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago$/i);
+      if (relative) {
+        const amount = Number(relative[1]);
+        const unit = relative[2].toLowerCase();
+        const published = new Date();
+        if (unit === "month") published.setMonth(published.getMonth() - amount);
+        else if (unit === "year") published.setFullYear(published.getFullYear() - amount);
+        else {
+          const unitMs = unit === "minute" ? 60_000 : unit === "hour" ? 3_600_000 : unit === "day" ? 86_400_000 : 604_800_000;
+          published.setTime(published.getTime() - amount * unitMs);
+        }
+        return published.toISOString();
+      }
+      if (/^yesterday$/i.test(value.trim())) return new Date(Date.now() - 86_400_000).toISOString();
+    }
+    const numericDate = typeof value === "number" || /^\d{9,13}$/.test(value);
+    const numericValue = numericDate ? Number(value) : NaN;
+    const timestamp = numericDate
+      ? numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue
+      : Date.parse(value);
+    if (Number.isFinite(timestamp)) return new Date(timestamp).toISOString();
+  }
+  return undefined;
 }
 function xmlText(block: string, tag: string) {
   const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

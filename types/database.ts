@@ -14,7 +14,7 @@ export interface Database {
       profiles: Table<{ id: string; full_name: string | null; company: string | null; industry: string | null; avatar_url: string | null; is_platform_admin: boolean; created_at: string; updated_at: string }>;
       organizations: Table<{ id: string; name: string; slug: string; industry: string | null; created_by: string; created_at: string; updated_at: string; deleted_at: string | null }>;
       organization_members: Table<{ id: string; organization_id: string; user_id: string; role: "owner" | "admin" | "member"; status: "active" | "invited"; invited_at: string | null; joined_at: string | null; created_at: string }>;
-      keyword_trackers: Table<{ id: string; organization_id: string; created_by: string; keyword: string; negative_keywords: string[]; communities: string[]; platforms: string[]; alert_threshold: number; status: "active" | "paused"; deleted_at: string | null; created_at: string; updated_at: string }>;
+      keyword_trackers: Table<{ id: string; organization_id: string; created_by: string; keyword: string; negative_keywords: string[]; communities: string[]; platforms: string[]; alert_threshold: number; last_run_at: string | null; excluded_categories: string[]; signals_filtered_old: number; signals_filtered_undated: number; signals_filtered_category: number; status: "active" | "paused"; deleted_at: string | null; created_at: string; updated_at: string }>;
       tracker_profiles: Table<{ id: string; organization_id: string; tracker_id: string; business_description: string; business_summary: string; industry: string; target_audience: string[]; pain_points: string[]; generated_at: string; model: string; prompt_version: string; created_at: string }>;
       tracker_keywords: Table<{ id: string; organization_id: string; tracker_id: string; keyword_type: "product" | "intent" | "negative"; keyword: string; created_at: string }>;
       tracker_competitors: Table<{ id: string; organization_id: string; tracker_id: string; name: string; created_at: string }>;
@@ -57,6 +57,8 @@ export interface Database {
       update_manual_tracker: { Args: { target_org: string; target_tracker: string; target_keyword: string; target_keywords: string[]; target_intent_keywords: string[]; target_negative_keywords: string[]; target_communities: string[]; target_sources: string[]; target_websites: string[]; target_queries: string[]; target_alert_threshold: number }; Returns: boolean };
       create_tracker_run: { Args: { target_org: string; target_tracker: string; target_diagnostic_mode: boolean }; Returns: string };
       consume_ai_rate_limit: { Args: { target_org: string; max_requests?: number }; Returns: boolean };
+      record_tracker_filter_metrics: { Args: { target_org: string; target_tracker: string; old_count: number; undated_count: number; category_count: number }; Returns: undefined };
+      get_tracker_signal_analytics: { Args: { target_org: string; target_trackers: string[] }; Returns: { tracker_id: string; signals_today: number; signals_7d: number; signals_30d: number }[] };
       aggregate_daily_analytics: { Args: { target_day: string }; Returns: number };
       is_org_member: { Args: { target_org: string }; Returns: boolean };
       has_org_role: { Args: { target_org: string; allowed_roles: string[] }; Returns: boolean };

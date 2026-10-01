@@ -24,6 +24,7 @@ function parseManualTracker(data: FormData) {
     websites: list(data, "websites"),
     queries: list(data, "queries"),
     alertThreshold: text(data, "alertThreshold") || "75",
+    excludedCategories: data.getAll("excludedCategories").map(String),
   });
 }
 
@@ -118,6 +119,11 @@ export async function createManualTracker(data: FormData) {
       console.error("Manual tracker creation failed", { code: error?.code, message: error?.message });
       return { error: "Tracker could not be created. Check the details and try again." };
     }
+    const { error: exclusionError } = await supabase.from("keyword_trackers").update({ excluded_categories: parsed.data.excludedCategories }).eq("id", result.tracker_id).eq("organization_id", organization.id);
+    if (exclusionError) {
+      console.error("Tracker category exclusions could not be saved", { trackerId: result.tracker_id, code: exclusionError.code });
+      return { error: "Tracker was created but its category exclusions could not be saved. Edit the tracker settings and retry." };
+    }
     await supabase.from("activity_logs").insert({ organization_id: organization.id, user_id: user.id, action: "tracker.created", entity_type: "keyword_tracker", entity_id: result.tracker_id, metadata: { creation_mode: "manual" } });
     after(async () => {
       try { await runTrackerDiscovery(organization.id, result.tracker_id, result.run_id); }
@@ -144,6 +150,8 @@ export async function updateTracker(data: FormData) {
     const { supabase, user, organization } = await requireOrganization();
     const { data: updated, error } = await supabase.rpc("update_manual_tracker", { target_tracker: id, ...manualTrackerRpcArgs(organization.id, parsed.data) });
     if (error || updated !== true) return { error: "Tracker could not be updated. It may have been archived or removed." };
+    const { error: exclusionError } = await supabase.from("keyword_trackers").update({ excluded_categories: parsed.data.excludedCategories }).eq("id", id).eq("organization_id", organization.id).is("deleted_at", null);
+    if (exclusionError) return { error: "Tracker settings were updated, but category exclusions could not be saved." };
     await supabase.from("activity_logs").insert({ organization_id: organization.id, user_id: user.id, action: "tracker.updated", entity_type: "keyword_tracker", entity_id: id });
     revalidatePath("/campaigns");
     revalidatePath(`/campaigns/${id}`);

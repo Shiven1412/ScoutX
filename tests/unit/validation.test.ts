@@ -94,6 +94,7 @@ import { readJsonResponse } from "@/lib/http";
       alertThreshold: 75,
     };
     expect(manualTrackerSchema.safeParse(manual).success).toBe(true);
+    expect(manualTrackerSchema.parse(manual).excludedCategories).toEqual(["ignore", "product_launch", "self_promotion", "career_discussion"]);
     expect(manualTrackerSchema.safeParse({ ...manual, sources: [] }).success).toBe(false);
     expect(manualTrackerSchema.safeParse({ ...manual, communities: ["not a subreddit"] }).success).toBe(false);
     expect(manualTrackerSchema.safeParse({ ...manual, websites: ["http://localhost/private"] }).success).toBe(false);

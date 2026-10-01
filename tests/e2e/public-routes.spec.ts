@@ -2,8 +2,8 @@ import { expect, test } from "@playwright/test";
 
 test("marketing page contains no demo metrics and links to authentication", async ({ page }) => {
   const response = await page.goto("/");
-  await expect(page.getByRole("heading", { name: /turn buyer intent into real pipeline/i })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Sign in", exact: true })).toHaveAttribute("href", "/login");
+  await expect(page.getByRole("heading", { name: /meet buyers at the moment they’re looking for a solution/i })).toBeVisible();
+  await expect(page.getByRole("navigation").getByRole("link", { name: "Sign in", exact: true })).toHaveAttribute("href", "/login");
   await expect(page.getByText(/3\.2M|284k|84\.2M|Maya Kim/)).toHaveCount(0);
   const csp = response?.headers()["content-security-policy"] ?? "";
   expect(csp).toContain("https://us-assets.i.posthog.com");

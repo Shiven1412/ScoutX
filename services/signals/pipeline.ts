@@ -20,6 +20,7 @@ type SignalProcessingDiagnostics = {
   existingIdDuplicates: number;
   existingContentDuplicates: number;
   signalsSaved: number;
+  signalsFilteredCategory: number;
   scoringFallbacks: number;
   scoringFallbackReasons: string[];
   scoringFallbackCodes: string[];
@@ -35,7 +36,7 @@ class SignalProcessingError extends Error {
 }
 
 function emptyProcessingDiagnostics(): SignalProcessingDiagnostics {
-  return { recordsAnalyzed: 0, recordsScored: 0, recordsAboveThreshold: 0, spamFiltered: 0, batchDuplicates: 0, existingIdDuplicates: 0, existingContentDuplicates: 0, signalsSaved: 0, scoringFallbacks: 0, scoringFallbackReasons: [], scoringFallbackCodes: [], geminiStatus: "not_used", supabaseStatus: "not_attempted" };
+  return { recordsAnalyzed: 0, recordsScored: 0, recordsAboveThreshold: 0, spamFiltered: 0, batchDuplicates: 0, existingIdDuplicates: 0, existingContentDuplicates: 0, signalsSaved: 0, signalsFilteredCategory: 0, scoringFallbacks: 0, scoringFallbackReasons: [], scoringFallbackCodes: [], geminiStatus: "not_used", supabaseStatus: "not_attempted" };
 }
 
 export async function markTrackerRunFailed(organizationId: string, trackerId: string, runId: string, reason = "Collection stopped unexpectedly before its providers completed.") {
@@ -90,9 +91,12 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
     return { status: existing?.status ?? "missing", duplicate: true };
   }
   const diagnosticMode = claimed.diagnostic_mode;
+  const { error: lastRunError } = await admin.from("keyword_trackers").update({ last_run_at: startedAt })
+    .eq("id", trackerId).eq("organization_id", organizationId);
+  if (lastRunError) console.error("Tracker last-run timestamp could not be updated", { trackerId, code: lastRunError.code });
 
   const { data: tracker, error: trackerError } = await admin.from("keyword_trackers")
-    .select("id, organization_id, keyword, negative_keywords, communities, platforms, alert_threshold, status, deleted_at")
+    .select("id, organization_id, keyword, negative_keywords, communities, platforms, alert_threshold, excluded_categories, status, deleted_at")
     .eq("id", trackerId).eq("organization_id", organizationId).maybeSingle();
   if (trackerError || !tracker || tracker.status !== "active" || tracker.deleted_at) {
     await finishTrackerRun(organizationId, trackerId, runId, "failed", 0, "Tracker is unavailable or paused.", startedAt);
@@ -121,6 +125,9 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
 
   let completedProviders = 0;
   let insertedTotal = 0;
+  let filteredOldTotal = 0;
+  let filteredUndatedTotal = 0;
+  let filteredCategoryTotal = 0;
   let recordsFetchedTotal = 0;
   let recordsFilteredTotal = 0;
   let signalsGeneratedTotal = 0;
@@ -156,6 +163,10 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
       providerCollection = collection;
       recordsFetchedTotal += collection.recordsFetched;
       signalsGeneratedTotal += collection.signals.length;
+      if (!diagnosticMode) {
+        filteredOldTotal += collection.signalsFilteredOld;
+        filteredUndatedTotal += collection.signalsFilteredUndated;
+      }
       let recordsFiltered = collection.recordsFiltered;
       let inserted = 0;
       let pipelineFiltered = 0;
@@ -166,6 +177,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
         inserted = ingested.inserted;
         pipelineFiltered = ingested.filtered;
         scoringFallbacks = ingested.scoringFallbacks;
+        filteredCategoryTotal += ingested.filteredCategory;
         processingDiagnostics = ingested.diagnostics;
         recordsAnalyzedTotal += processingDiagnostics.recordsAnalyzed;
         recordsScoredTotal += processingDiagnostics.recordsScored;
@@ -183,6 +195,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
       const details: Record<string, Json> = {
         provider: providerName, recordsFetched: collection.recordsFetched, recordsFiltered, providerFiltered: collection.recordsFiltered,
         pipelineFiltered, signalsGenerated: collection.signals.length, collected: collection.signals.length,
+        signalsFilteredOld: collection.signalsFilteredOld,
         inserted, duration_ms: Date.now() - providerStartedAt, warning: providerWarning,
         providerWarnings: collection.warnings,
         ...processingDiagnostics,
@@ -216,6 +229,7 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
         recordsAboveThresholdTotal += error.diagnostics.recordsAboveThreshold;
         recordsFilteredTotal += error.diagnostics.spamFiltered + error.diagnostics.batchDuplicates + error.diagnostics.existingIdDuplicates + error.diagnostics.existingContentDuplicates;
         insertedTotal += error.diagnostics.signalsSaved;
+        filteredCategoryTotal += error.diagnostics.signalsFilteredCategory;
       }
       console.error(`Tracker ${providerName} discovery failed`, { trackerId, organizationId, recordsFetched: failedRecordsFetched, signalsGenerated: providerCollection?.signals.length ?? 0, detail });
       await admin.from("provider_status").upsert({ organization_id: organizationId, provider: providerName, connected: true, sync_status: "error", updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
@@ -234,16 +248,18 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
         await writeTrackerEvent(organizationId, trackerId, runId, "provider_started", "Trying Apify Reddit fallback", { provider: "apify", status: "connecting" });
         try {
           const fallback = await signalProviders.apify.collectSignals(enriched, { diagnosticMode });
-          const ingested = diagnosticMode ? { inserted: 0, filtered: 0, diagnostics: emptyProcessingDiagnostics() } : await scoreDeduplicateAndIngest(enriched, "apify", fallback.signals, runId);
+          const ingested = diagnosticMode ? { inserted: 0, filtered: 0, filteredCategory: 0, diagnostics: emptyProcessingDiagnostics() } : await scoreDeduplicateAndIngest(enriched, "apify", fallback.signals, runId);
           recordsFetchedTotal += fallback.recordsFetched;
+          if (!diagnosticMode) filteredOldTotal += fallback.signalsFilteredOld;
           recordsFilteredTotal += fallback.recordsFiltered + ingested.filtered;
           signalsGeneratedTotal += fallback.signals.length;
           insertedTotal += ingested.inserted;
+          filteredCategoryTotal += ingested.filteredCategory;
           const fallbackWarning = fallback.recordsFetched === 0 || fallback.signals.length === 0;
           if (fallbackWarning) warningProviders += 1;
           else recoveredFailures += 1;
           await admin.from("provider_status").upsert({ organization_id: organizationId, provider: "apify", connected: true, sync_status: "healthy", last_sync_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
-          const fallbackDetails: Record<string, Json> = { provider: "apify", recordsFetched: fallback.recordsFetched, recordsFiltered: fallback.recordsFiltered + ingested.filtered, signalsGenerated: fallback.signals.length, signalsSaved: ingested.inserted, collected: fallback.signals.length, inserted: ingested.inserted, warning: fallbackWarning, zeroReason: fallback.zeroReason, diagnosticMode, requests: fallback.requests as unknown as Json };
+          const fallbackDetails: Record<string, Json> = { provider: "apify", recordsFetched: fallback.recordsFetched, recordsFiltered: fallback.recordsFiltered + ingested.filtered, signalsFilteredOld: fallback.signalsFilteredOld, signalsFilteredCategory: ingested.filteredCategory, signalsGenerated: fallback.signals.length, signalsSaved: ingested.inserted, collected: fallback.signals.length, inserted: ingested.inserted, warning: fallbackWarning, zeroReason: fallback.zeroReason, diagnosticMode, requests: fallback.requests as unknown as Json };
           if (diagnosticMode) fallbackDetails.rawPreview = fallback.rawPreview as unknown as Json;
           await writeTrackerEvent(organizationId, trackerId, runId, fallbackWarning ? "provider_warning" : "provider_completed", fallbackWarning ? "Apify fallback returned no usable records" : "Apify Reddit fallback complete", fallbackDetails);
         } catch (fallbackError) {
@@ -259,16 +275,18 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
         await writeTrackerEvent(organizationId, trackerId, runId, "provider_started", "Trying public search fallback for crawl sources", { provider: "serper", status: "connecting" });
         try {
           const fallback = await signalProviders.serper.collectSignals({ ...enriched, sources: [] }, { diagnosticMode });
-          const ingested = diagnosticMode ? { inserted: 0, filtered: 0, diagnostics: emptyProcessingDiagnostics() } : await scoreDeduplicateAndIngest(enriched, "serper", fallback.signals, runId);
+          const ingested = diagnosticMode ? { inserted: 0, filtered: 0, filteredCategory: 0, diagnostics: emptyProcessingDiagnostics() } : await scoreDeduplicateAndIngest(enriched, "serper", fallback.signals, runId);
           recordsFetchedTotal += fallback.recordsFetched;
+          if (!diagnosticMode) filteredOldTotal += fallback.signalsFilteredOld;
           recordsFilteredTotal += fallback.recordsFiltered + ingested.filtered;
           signalsGeneratedTotal += fallback.signals.length;
           insertedTotal += ingested.inserted;
+          filteredCategoryTotal += ingested.filteredCategory;
           const fallbackWarning = fallback.recordsFetched === 0 || fallback.signals.length === 0;
           if (fallbackWarning) warningProviders += 1;
           else recoveredFailures += 1;
           await admin.from("provider_status").upsert({ organization_id: organizationId, provider: "serper", connected: true, sync_status: "healthy", last_sync_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "organization_id,provider" });
-          const fallbackDetails: Record<string, Json> = { provider: "serper", recordsFetched: fallback.recordsFetched, recordsFiltered: fallback.recordsFiltered + ingested.filtered, signalsGenerated: fallback.signals.length, signalsSaved: ingested.inserted, collected: fallback.signals.length, inserted: ingested.inserted, warning: fallbackWarning, zeroReason: fallback.zeroReason, diagnosticMode, requests: fallback.requests as unknown as Json };
+          const fallbackDetails: Record<string, Json> = { provider: "serper", recordsFetched: fallback.recordsFetched, recordsFiltered: fallback.recordsFiltered + ingested.filtered, signalsFilteredOld: fallback.signalsFilteredOld, signalsFilteredCategory: ingested.filteredCategory, signalsGenerated: fallback.signals.length, signalsSaved: ingested.inserted, collected: fallback.signals.length, inserted: ingested.inserted, warning: fallbackWarning, zeroReason: fallback.zeroReason, diagnosticMode, requests: fallback.requests as unknown as Json };
           if (diagnosticMode) fallbackDetails.rawPreview = fallback.rawPreview as unknown as Json;
           await writeTrackerEvent(organizationId, trackerId, runId, fallbackWarning ? "provider_warning" : "provider_completed", fallbackWarning ? "Public search fallback returned no usable records" : "Public search fallback complete", fallbackDetails);
         } catch (fallbackError) {
@@ -285,6 +303,16 @@ export async function runTrackerDiscovery(organizationId: string, trackerId: str
 
   const status = !selected.length || (completedProviders === 0 && recoveredFailures === 0) ? "failed" : failedProviders > recoveredFailures || warningProviders > 0 ? "partial" : "completed";
   const warning = warningProviders > 0 || recordsFetchedTotal === 0 || signalsGeneratedTotal === 0;
+  if (!diagnosticMode && (filteredOldTotal > 0 || filteredUndatedTotal > 0 || filteredCategoryTotal > 0)) {
+    const { error: metricsError } = await admin.rpc("record_tracker_filter_metrics", {
+      target_org: organizationId,
+      target_tracker: trackerId,
+      old_count: filteredOldTotal,
+      undated_count: filteredUndatedTotal,
+      category_count: filteredCategoryTotal,
+    });
+    if (metricsError) console.error("Tracker signal-filter metrics could not be persisted", { trackerId, code: metricsError.code });
+  }
   const failureReason = providerFailureReasons.join("; ").slice(0, 450);
   await finishTrackerRun(
     organizationId,
@@ -322,7 +350,7 @@ async function scoreDeduplicateAndIngest(tracker: SignalTracker, providerName: k
   const unique = deduplicated;
   console.info("Signal processing stage", { stage: "keyword_filter_and_batch_dedupe", trackerId: tracker.id, provider: providerName, normalized: records.length, spamFiltered: diagnostics.spamFiltered, batchDuplicates: diagnostics.batchDuplicates, remaining: unique.length });
   await writeTrackerEvent(tracker.organization_id, tracker.id, runId, "signal_processing_stage", "Records analyzed", { provider: providerName, stage: "keyword_filter_and_batch_dedupe", normalized: records.length, spamFiltered: diagnostics.spamFiltered, batchDuplicates: diagnostics.batchDuplicates, recordsAnalyzed: 0 });
-  if (!unique.length) return { inserted: 0, filtered: records.length, scoringFallbacks: 0, scoringFallbackReasons: [] as string[], diagnostics };
+  if (!unique.length) return { inserted: 0, filtered: records.length, filteredCategory: 0, scoringFallbacks: 0, scoringFallbackReasons: [] as string[], diagnostics };
   const candidateHashes = new Map(unique.map((signal) => [`${signal.platform}:${signal.external_id}`, contentHash(signal.post_snippet)]));
     const [existingIds, existingHashes] = await Promise.all([
     admin.from("intent_signals").select("platform, external_id").eq("organization_id", tracker.organization_id).in("platform", [...new Set(unique.map((signal) => signal.platform))]).in("external_id", unique.map((signal) => signal.external_id)),
@@ -365,10 +393,19 @@ async function scoreDeduplicateAndIngest(tracker: SignalTracker, providerName: k
       if ("fallbackCode" in score && typeof score.fallbackCode === "string") diagnostics.scoringFallbackCodes = [...new Set([...diagnostics.scoringFallbackCodes, score.fallbackCode])];
     }
   }
+  const excludedCategories = new Set<string>(tracker.excluded_categories ?? []);
+  const excludedSignals = scored.filter((signal) => excludedCategories.has(signal.category));
+  diagnostics.signalsFilteredCategory = excludedSignals.length;
+  const acceptedSignals = scored.filter((signal) => !excludedCategories.has(signal.category));
+  if (excludedSignals.length) {
+    const categoryCounts = excludedSignals.reduce<Record<string, number>>((counts, signal) => ({ ...counts, [signal.category]: (counts[signal.category] ?? 0) + 1 }), {});
+    console.info("Signals excluded by tracker category rules", { trackerId: tracker.id, provider: providerName, categories: categoryCounts, excludedCount: excludedSignals.length });
+    await writeTrackerEvent(tracker.organization_id, tracker.id, runId, "signal_processing_stage", "Signals excluded by category rules", { provider: providerName, stage: "category_exclusion", signalsFilteredCategory: excludedSignals.length, categoryCounts, excludedCategories: [...excludedCategories] });
+  }
   diagnostics.geminiStatus = diagnostics.scoringFallbacks ? "fallback" : scored.length ? "healthy" : "not_used";
   console.info("Signal processing stage", { stage: "analysis_and_scoring", trackerId: tracker.id, provider: providerName, recordsAnalyzed: diagnostics.recordsAnalyzed, recordsScored: diagnostics.recordsScored, recordsAboveThreshold: diagnostics.recordsAboveThreshold, threshold: tracker.alert_threshold ?? 75, scoringFallbacks: diagnostics.scoringFallbacks, scoringFallbackReasons: diagnostics.scoringFallbackReasons });
   await writeTrackerEvent(tracker.organization_id, tracker.id, runId, "signal_processing_stage", "Signals analyzed and scored", { provider: providerName, stage: "analysis_and_scoring", recordsAnalyzed: diagnostics.recordsAnalyzed, recordsScored: diagnostics.recordsScored, recordsAboveThreshold: diagnostics.recordsAboveThreshold, alertThreshold: tracker.alert_threshold ?? 75, scoringFallbacks: diagnostics.scoringFallbacks, scoringFallbackReasons: diagnostics.scoringFallbackReasons, scoringFallbackCodes: diagnostics.scoringFallbackCodes, geminiStatus: diagnostics.geminiStatus });
-  if (!scored.length) return { inserted: 0, filtered: records.length, scoringFallbacks: 0, scoringFallbackReasons: [] as string[], diagnostics };
+  if (!acceptedSignals.length) return { inserted: 0, filtered: records.length, filteredCategory: excludedSignals.length, scoringFallbacks: 0, scoringFallbackReasons: [] as string[], diagnostics };
 
   const { data: subscription, error: subscriptionError } = await admin.from("subscriptions").select("status, signals_used, signals_total").eq("organization_id", tracker.organization_id).maybeSingle();
   if (subscriptionError) {
@@ -382,13 +419,13 @@ async function scoreDeduplicateAndIngest(tracker: SignalTracker, providerName: k
   let remainingSignalQuota = Math.max(0, subscription.signals_total - subscription.signals_used);
 
   const batchSize = 100;
-  for (let offset = 0; offset < scored.length;) {
+  for (let offset = 0; offset < acceptedSignals.length;) {
     if (remainingSignalQuota <= 0) {
       diagnostics.supabaseStatus = "failed";
-      throw new SignalProcessingError(`Signal quota exceeded: ${diagnostics.signalsSaved} signals saved; ${scored.length - offset} scored signals remain, but this workspace has no signal quota left.`, "signal_quota_exceeded", diagnostics);
+      throw new SignalProcessingError(`Signal quota exceeded: ${diagnostics.signalsSaved} signals saved; ${acceptedSignals.length - offset} scored signals remain, but this workspace has no signal quota left.`, "signal_quota_exceeded", diagnostics);
     }
     const currentBatchSize = Math.min(batchSize, remainingSignalQuota);
-    const batch = scored.slice(offset, offset + currentBatchSize);
+    const batch = acceptedSignals.slice(offset, offset + currentBatchSize);
     const signalRows = batch.map((signal) => ({
       tracker_id: tracker.id, platform: signal.platform, external_id: signal.external_id, keyword: signal.keyword,
       prospect_name: signal.prospect_name, company: signal.company, source_url: signal.source_url, post_snippet: signal.post_snippet,
@@ -423,7 +460,7 @@ async function scoreDeduplicateAndIngest(tracker: SignalTracker, providerName: k
     offset += batch.length;
   }
   if (diagnostics.signalsSaved > 0) await writeTrackerEvent(tracker.organization_id, tracker.id, runId, "signal_detected", `${diagnostics.signalsSaved} intent signal${diagnostics.signalsSaved === 1 ? "" : "s"} detected`, { provider: providerName, count: diagnostics.signalsSaved });
-  return { inserted: diagnostics.signalsSaved, filtered: Math.max(0, records.length - diagnostics.signalsSaved), scoringFallbacks: diagnostics.scoringFallbacks, scoringFallbackReasons: diagnostics.scoringFallbackReasons, diagnostics };
+  return { inserted: diagnostics.signalsSaved, filtered: Math.max(0, records.length - diagnostics.signalsSaved), filteredCategory: excludedSignals.length, scoringFallbacks: diagnostics.scoringFallbacks, scoringFallbackReasons: diagnostics.scoringFallbackReasons, diagnostics };
 }
 
 function contentHash(content: string) {

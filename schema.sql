@@ -72,6 +72,11 @@ create table if not exists public.keyword_trackers (
   communities text[] not null default '{}',
   platforms text[] not null default '{}',
   alert_threshold integer not null default 75 check (alert_threshold between 0 and 100),
+  last_run_at timestamptz,
+  excluded_categories text[] not null default array['ignore', 'product_launch', 'self_promotion', 'career_discussion']::text[] check (excluded_categories <@ array['ignore', 'product_launch', 'self_promotion', 'thought_leadership', 'career_discussion', 'general_discussion', 'buying_intent', 'seeking_alternative', 'recommendation_request', 'pain_point', 'feature_request']::text[]),
+  signals_filtered_old bigint not null default 0 check (signals_filtered_old >= 0),
+  signals_filtered_undated bigint not null default 0 check (signals_filtered_undated >= 0),
+  signals_filtered_category bigint not null default 0 check (signals_filtered_category >= 0),
   status text not null check (status in ('active', 'paused')) default 'active',
   deleted_at timestamptz,
   created_at timestamptz not null default now(),
@@ -825,3 +830,41 @@ create policy organization_files_delete on storage.objects for delete to authent
   bucket_id = 'organization-files' and (storage.foldername(name))[1] ~* '^[0-9a-f-]{36}$'
   and public.has_org_role(((storage.foldername(name))[1])::uuid, array['owner','admin'])
 );
+
+create or replace function public.record_tracker_filter_metrics(target_org uuid, target_tracker uuid, old_count bigint, undated_count bigint, category_count bigint)
+returns void language plpgsql security definer set search_path = '' as $$
+begin
+  if (select auth.role()) <> 'service_role' or old_count < 0 or undated_count < 0 or category_count < 0 or old_count > 100000 or undated_count > 100000 or category_count > 100000 then
+    raise exception 'Invalid tracker filter metrics request';
+  end if;
+  update public.keyword_trackers
+  set signals_filtered_old = signals_filtered_old + old_count,
+      signals_filtered_undated = signals_filtered_undated + undated_count,
+      signals_filtered_category = signals_filtered_category + category_count,
+      updated_at = now()
+  where id = target_tracker and organization_id = target_org;
+  if not found then raise exception 'Tracker not found in target organization'; end if;
+end;
+$$;
+revoke all on function public.record_tracker_filter_metrics(uuid, uuid, bigint, bigint, bigint) from public, anon, authenticated;
+grant execute on function public.record_tracker_filter_metrics(uuid, uuid, bigint, bigint, bigint) to service_role;
+
+create or replace function public.get_tracker_signal_analytics(target_org uuid, target_trackers uuid[])
+returns table(tracker_id uuid, signals_today bigint, signals_7d bigint, signals_30d bigint)
+language plpgsql security definer set search_path = '' as $$
+begin
+  if auth.uid() is null or not public.is_org_member(target_org) then raise exception 'Active workspace membership required'; end if;
+  if coalesce(array_length(target_trackers, 1), 0) > 500 then raise exception 'Too many trackers requested'; end if;
+  return query
+  select t.id,
+    count(s.id) filter (where s.created_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc'),
+    count(s.id) filter (where s.created_at >= now() - interval '7 days'),
+    count(s.id) filter (where s.created_at >= now() - interval '30 days')
+  from public.keyword_trackers t
+  left join public.intent_signals s on s.tracker_id = t.id and s.organization_id = target_org
+  where t.organization_id = target_org and t.deleted_at is null and t.id = any(coalesce(target_trackers, '{}'::uuid[]))
+  group by t.id;
+end;
+$$;
+revoke all on function public.get_tracker_signal_analytics(uuid, uuid[]) from public, anon;
+grant execute on function public.get_tracker_signal_analytics(uuid, uuid[]) to authenticated, service_role;

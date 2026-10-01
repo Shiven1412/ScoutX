@@ -112,7 +112,7 @@ begin
   on conflict do nothing;
 
   insert into public.tracker_sources (organization_id, tracker_id, source_type, provider, source_value)
-  select target_org, new_tracker_id, 'community', 'serper', source
+  select target_org, new_tracker_id, 'community', 'serper', source_name
   from unnest(target_sources) as selected(source_name)
   where source_name in ('x','linkedin','indiehackers','producthunt','quora','techforums','github')
   on conflict do nothing;

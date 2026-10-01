@@ -4,6 +4,7 @@ import { z } from "zod";
 import { NextResponse, type NextRequest } from "next/server";
 import type { Json } from "@/types/database";
 import { deliverWebhookEvent } from "@/services/webhooks";
+import { isRecentSignal } from "@/services/signals/recency";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +16,7 @@ const signalSchema = z.object({
   prospect_name: z.string().trim().max(160).nullable().optional(),
   company: z.string().trim().max(180).nullable().optional(),
   source_url: z.string().url().max(2048).refine((value) => value.startsWith("https://") || value.startsWith("http://"), "Source URL must use HTTP or HTTPS.").nullable().optional(),
+  source_created_at: z.string().datetime().nullable().optional(),
   post_snippet: z.string().trim().min(1).max(12000),
   intent_score: z.number().int().min(0).max(100),
   confidence: z.number().int().min(0).max(100),
@@ -42,6 +44,19 @@ export async function POST(request: NextRequest) {
   }
   const parsed = batchSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: "Invalid signal batch.", issues: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) }, { status: 422 });
+  let filteredOld = 0;
+  let filteredUndated = 0;
+  const freshSignals = parsed.data.signals.filter((signal) => {
+    if (!signal.source_created_at) {
+      filteredUndated += 1;
+      console.info("Signal skipped because its publication date could not be verified", { source: "signal_ingestion_api", platform: signal.platform });
+      return false;
+    }
+    if (isRecentSignal(signal.source_created_at)) return true;
+    filteredOld += 1;
+    console.info("Signal skipped because it is older than 6 months", { source: "signal_ingestion_api", platform: signal.platform, sourceCreatedAt: signal.source_created_at });
+    return false;
+  });
 
   const admin = createAdminClient();
   const { data: key, error: keyError } = await admin.from("api_keys").select("id, organization_id, scopes, expires_at, revoked_at").eq("key_hash", hashSecret(match[1])).maybeSingle();
@@ -54,9 +69,16 @@ export async function POST(request: NextRequest) {
   if (!allowed) return NextResponse.json({ error: "Rate limit exceeded. Retry in one minute." }, { status: 429, headers: { "Retry-After": "60" } });
 
   await admin.from("api_keys").update({ last_used_at: new Date().toISOString() }).eq("id", key.id);
+  if (!freshSignals.length) {
+    return NextResponse.json({ accepted: 0, received: parsed.data.signals.length, duplicates: 0, filteredOld, filteredUndated }, { status: 201 });
+  }
   const { data: insertedCount, error: ingestError } = await admin.rpc("ingest_signals", {
     target_org: key.organization_id,
-    signal_rows: JSON.parse(JSON.stringify(parsed.data.signals.map((signal) => ({ ...signal, raw_payload: signal.raw_payload ?? {} })))) as Json,
+    signal_rows: JSON.parse(JSON.stringify(freshSignals.map((signal) => {
+      const persistableSignal = { ...signal };
+      delete persistableSignal.source_created_at;
+      return { ...persistableSignal, raw_payload: signal.raw_payload ?? {} };
+    }))) as Json,
   });
   if (ingestError) {
     const message = ingestError.message.includes("quota") ? "The organization has reached its signal quota." : ingestError.message.includes("Subscription") ? "An active subscription is required to ingest signals." : "Signal batch could not be stored.";
@@ -66,5 +88,5 @@ export async function POST(request: NextRequest) {
   if (insertedCount > 0) {
     void deliverWebhookEvent(key.organization_id, "signal.batch_ingested", { accepted: insertedCount }).catch((error: unknown) => console.error("Signal webhook delivery failed", error));
   }
-  return NextResponse.json({ accepted: insertedCount, received: parsed.data.signals.length, duplicates: parsed.data.signals.length - insertedCount }, { status: 201 });
+  return NextResponse.json({ accepted: insertedCount, received: parsed.data.signals.length, duplicates: freshSignals.length - insertedCount, filteredOld, filteredUndated }, { status: 201 });
 }
